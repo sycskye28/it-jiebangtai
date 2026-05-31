@@ -26,6 +26,12 @@ export function toAuthUser(row: DbUser): AuthUser {
   };
 }
 
+function isSuperAdminIdentity(feishuUserId: string, employeeNo?: string | null, name?: string | null) {
+  const normalizedId = feishuUserId.trim().toLowerCase();
+  const normalizedEmployeeNo = String(employeeNo ?? "").trim().toLowerCase();
+  return normalizedId === "a10986" || normalizedEmployeeNo === "a10986" || name === "沈昀初";
+}
+
 export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   const openId = String(userInfo.open_id ?? userInfo.openId ?? "");
   const userId = String(userInfo.user_id ?? userInfo.userId ?? userInfo.employee_no ?? userInfo.employeeNo ?? openId);
@@ -33,6 +39,7 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   const employeeNo = userInfo.employee_no ? String(userInfo.employee_no) : userId;
   const name = String(userInfo.name ?? userInfo.en_name ?? employeeNo ?? userId);
   const avatarUrl = userInfo.avatar_url ? String(userInfo.avatar_url) : null;
+  const role: AuthUser["role"] = isSuperAdminIdentity(userId || openId, employeeNo, name) ? "admin" : "business";
 
   if (!userId && !openId) {
     throw new Error("Feishu user info does not contain user_id or open_id.");
@@ -40,16 +47,17 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
 
   const result = await query<DbUser>(
     `INSERT INTO users (feishu_user_id, feishu_open_id, feishu_union_id, employee_no, name, avatar_url, role, access_status)
-     VALUES ($1, $2, $3, $4, $5, $6, 'business', 'active')
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
      ON CONFLICT (feishu_user_id) DO UPDATE
        SET feishu_open_id = EXCLUDED.feishu_open_id,
            feishu_union_id = EXCLUDED.feishu_union_id,
            employee_no = EXCLUDED.employee_no,
            name = EXCLUDED.name,
            avatar_url = EXCLUDED.avatar_url,
+           role = EXCLUDED.role,
            updated_at = now()
      RETURNING *`,
-    [userId || openId, openId || null, unionId, employeeNo || null, name, avatarUrl]
+    [userId || openId, openId || null, unionId, employeeNo || null, name, avatarUrl, role]
   );
 
   return toAuthUser(result.rows[0]);
@@ -67,7 +75,7 @@ export async function ensureDevUser(headers: Record<string, string | string[] | 
   const feishuUserId = String(headers["x-dev-user-id"] ?? "dev-admin");
   const name = decodeHeaderValue(String(headers["x-dev-user-name"] ?? "%E5%BD%AD%E6%B6%9B"));
   const department = decodeHeaderValue(String(headers["x-dev-department"] ?? "IT"));
-  const role = String(headers["x-dev-role"] ?? "admin") as AuthUser["role"];
+  const role: AuthUser["role"] = isSuperAdminIdentity(feishuUserId, feishuUserId, name) ? "admin" : "business";
 
   const result = await query<DbUser>(
     `INSERT INTO users (feishu_user_id, name, department, role, access_status)

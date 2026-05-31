@@ -168,7 +168,7 @@ export class FeishuService {
     }
 
     const appToken = await this.getAppAccessToken();
-    const tokenResponse = await fetch("https://open.feishu.cn/open-apis/authen/v1/oidc/access_token", {
+    const tokenResponse = await fetch("https://open.feishu.cn/open-apis/authen/v1/access_token", {
       method: "POST",
       headers: {
         authorization: `Bearer ${appToken}`,
@@ -188,17 +188,31 @@ export class FeishuService {
         refresh_token?: string;
         refresh_expires_in?: number;
         scope?: string;
+        open_id?: string;
+        union_id?: string;
+        user_id?: string;
+        employee_no?: string;
+        name?: string;
+        en_name?: string;
+        avatar_url?: string;
+        email?: string;
+        enterprise_email?: string;
+        mobile?: string;
+        tenant_key?: string;
       };
     };
     if (tokenData.code !== 0 || !tokenData.data?.access_token) {
       throw new Error(`Failed to exchange Feishu login code: ${tokenData.msg ?? tokenData.code}`);
     }
 
-    const userInfo = await this.getLoginUserInfo(tokenData.data.access_token);
+    const { access_token, expires_in, scope, refresh_token, refresh_expires_in, ...inlineUserInfo } = tokenData.data;
+    const userInfo = inlineUserInfo.open_id || inlineUserInfo.user_id || inlineUserInfo.name
+      ? inlineUserInfo
+      : await this.getLoginUserInfo(access_token);
     return {
-      accessToken: tokenData.data.access_token,
-      expiresIn: tokenData.data.expires_in,
-      scope: tokenData.data.scope ?? "",
+      accessToken: access_token,
+      expiresIn: expires_in,
+      scope: scope ?? "",
       userInfo
     };
   }

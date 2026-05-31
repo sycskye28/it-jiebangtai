@@ -18,7 +18,7 @@ export async function registerAuth(app: FastifyInstance) {
   app.get("/api/auth/feishu/oauth-url", async (request) => {
     const query = z.object({ redirectUri: z.string().url().optional() }).parse(request.query);
     const redirectUri = query.redirectUri ?? process.env.FEISHU_WEB_REDIRECT_URI ?? "http://localhost:5173";
-    const url = new URL("https://accounts.feishu.cn/open-apis/authen/v1/authorize");
+    const url = new URL("https://passport.feishu.cn/suite/passport/oauth/authorize");
     url.searchParams.set("client_id", process.env.FEISHU_APP_ID ?? "");
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("response_type", "code");

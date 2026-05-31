@@ -20,7 +20,7 @@ async function request<T>(path: string, options: RequestInit = {}) {
       ...(isFormData ? {} : { "content-type": "application/json" }),
       "x-dev-user-id": localStorage.getItem("devUserId") ?? "dev-admin",
       "x-dev-user-name": headerSafe(localStorage.getItem("devUserName") ?? "彭涛"),
-      "x-dev-role": localStorage.getItem("devRole") ?? "admin",
+      "x-dev-role": localStorage.getItem("devRole") ?? "business",
       ...(options.headers ?? {})
     }
   });
@@ -75,6 +75,16 @@ export const api = {
   updateFieldConfig: (id: string, values: Record<string, unknown>) => request<any>(`/api/admin/field-configs/${id}`, {
     method: "PATCH",
     body: JSON.stringify(values)
+  }),
+  syncBitableSchema: () => request<{
+    disabledFormTypes: string[];
+    importedFormTypes: string[];
+    syncedFields: number;
+    createdFields: number;
+    removedFields: number;
+  }>("/api/admin/feishu/sync-from-bitable", {
+    method: "POST",
+    body: JSON.stringify({})
   }),
   accessRequests: () => request<any[]>("/api/admin/access-requests")
 };

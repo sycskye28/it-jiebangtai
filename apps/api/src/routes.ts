@@ -67,9 +67,29 @@ function bitableFieldType(kind: string) {
   return types[kind] ?? 1;
 }
 
+function kindFromBitableFieldType(type: unknown) {
+  const normalized = Number(type);
+  if (normalized === 2) return "number";
+  if (normalized === 3) return "select";
+  if (normalized === 5) return "date";
+  if (normalized === 7) return "boolean";
+  if (normalized === 17) return "attachment";
+  return "text";
+}
+
 function bitableFieldProperty(kind: string, options: string[]) {
   if (kind === "select" && options.length) return { options: options.map((name) => ({ name })) };
   return null;
+}
+
+function optionsFromBitableField(field: Record<string, unknown>) {
+  const property = field.property as Record<string, unknown> | undefined;
+  const options = property?.options;
+  if (!Array.isArray(options)) return [];
+  return options.map((option) => {
+    if (option && typeof option === "object") return String((option as Record<string, unknown>).name ?? "");
+    return String(option ?? "");
+  }).filter(Boolean);
 }
 
 function fieldKeyFromLabel(label: string) {
@@ -81,9 +101,27 @@ function fieldKeyFromLabel(label: string) {
   return normalized || `field_${randomUUID().slice(0, 8)}`;
 }
 
+function formTypeKeyFromTable(tableId: string) {
+  return `bitable_${tableId.slice(-8).replace(/[^a-zA-Z0-9_]/g, "").toLowerCase()}`;
+}
+
+function cleanFormTypeName(tableName: string) {
+  return tableName.replace(/记录表$/u, "") || tableName;
+}
+
 async function tableIdForType(typeKey: string) {
   const formType = await query<{ feishu_table_id: string | null }>("SELECT feishu_table_id FROM form_types WHERE key = $1", [typeKey]);
   return formType.rows[0]?.feishu_table_id || feishuService.tableIdForType(typeKey);
+}
+
+function builtinTypeForTableId(tableId: string) {
+  if (tableId === config.feishu.demandTableId) return "demand";
+  if (tableId === config.feishu.issueTableId) return "issue";
+  return null;
+}
+
+function isManagedNonRecordTable(tableId: string) {
+  return tableId === config.feishu.systemOwnerTableId;
 }
 
 async function recordValuesToFeishuFields(typeKey: string, values: Record<string, unknown>) {
@@ -303,6 +341,118 @@ export async function registerRoutes(app: FastifyInstance) {
       [result.rows[0].id, JSON.stringify(result.rows[0]), request.user.id, request.user.name]
     );
     return result.rows[0];
+  });
+
+  app.post("/api/admin/feishu/sync-from-bitable", async (request) => {
+    adminOnly(request.user.role);
+    const tables = await feishuService.listBitableTables();
+    const remoteTables = tables.items ?? [];
+    const remoteTableIds = new Set(remoteTables.map((table) => table.table_id));
+    const summary = {
+      disabledFormTypes: [] as string[],
+      importedFormTypes: [] as string[],
+      syncedFields: 0,
+      createdFields: 0,
+      removedFields: 0
+    };
+
+    await withTransaction(async (client) => {
+      const localTypes = await client.query<any>("SELECT * FROM form_types ORDER BY sort_order, name");
+      for (const type of localTypes.rows) {
+        if (type.feishu_table_id && !remoteTableIds.has(type.feishu_table_id) && type.enabled) {
+          await client.query("UPDATE form_types SET enabled=false, updated_at=now() WHERE id=$1", [type.id]);
+          summary.disabledFormTypes.push(type.name);
+        }
+      }
+
+      const existingByTable = new Map<string, any>(localTypes.rows.filter((type: any) => type.feishu_table_id).map((type: any) => [type.feishu_table_id, type]));
+      for (const table of remoteTables) {
+        if (isManagedNonRecordTable(table.table_id)) continue;
+        let localType: any = existingByTable.get(table.table_id);
+        const builtinKey = builtinTypeForTableId(table.table_id);
+        if (!localType && builtinKey) {
+          const updatedBuiltin = await client.query<any>(
+            "UPDATE form_types SET feishu_table_id=$2, enabled=true, updated_at=now() WHERE key=$1 RETURNING *",
+            [builtinKey, table.table_id]
+          );
+          localType = updatedBuiltin.rows[0];
+        }
+        if (!localType) {
+          const key = formTypeKeyFromTable(table.table_id);
+          const name = cleanFormTypeName(table.name);
+          const inserted = await client.query<any>(
+            `INSERT INTO form_types (key, name, description, title_field_key, system_field_key, submitter_field_key, status_field_key, feishu_table_id, sort_order)
+             VALUES ($1,$2,'从飞书多维表格同步导入。','title','system','submitter','status',$3,(SELECT COALESCE(MAX(sort_order),0)+1 FROM form_types))
+             ON CONFLICT (key) DO UPDATE SET enabled=true, feishu_table_id=EXCLUDED.feishu_table_id, updated_at=now()
+             RETURNING *`,
+            [key, name, table.table_id]
+          );
+          localType = inserted.rows[0];
+          summary.importedFormTypes.push(name);
+        } else if (!localType.enabled) {
+          const enabled = await client.query<any>("UPDATE form_types SET enabled=true, updated_at=now() WHERE id=$1 RETURNING *", [localType.id]);
+          localType = enabled.rows[0];
+        }
+
+        const fields = await feishuService.listBitableFields(table.table_id);
+        const remoteFields = (fields.items ?? []).filter((field: any) => field.field_name && field.field_id);
+        const remoteNames = new Set(remoteFields.map((field: any) => String(field.field_name)));
+        const localFields = await client.query<any>("SELECT * FROM field_configs WHERE form_type_key=$1", [localType.key]);
+
+        for (const localField of localFields.rows) {
+          if (localField.feishu_field_name && !remoteNames.has(localField.feishu_field_name)) {
+            await client.query("DELETE FROM field_configs WHERE id=$1", [localField.id]);
+            summary.removedFields += 1;
+          }
+        }
+
+        const refreshedLocalFields = await client.query<any>("SELECT * FROM field_configs WHERE form_type_key=$1", [localType.key]);
+        const byFeishuName = new Map<string, any>(refreshedLocalFields.rows.map((field: any) => [field.feishu_field_name, field]));
+        let sortOrder = refreshedLocalFields.rows.reduce((max: number, field: any) => Math.max(max, Number(field.sort_order ?? 0)), 0);
+
+        for (const remoteField of remoteFields as Array<Record<string, unknown>>) {
+          const label = String(remoteField.field_name);
+          const kind = kindFromBitableFieldType(remoteField.type);
+          const options = optionsFromBitableField(remoteField);
+          const existing = byFeishuName.get(label);
+          if (existing) {
+            await client.query(
+              `UPDATE field_configs
+                  SET label=$2,
+                      kind=$3,
+                      options=$4,
+                      updated_at=now()
+                WHERE id=$1`,
+              [existing.id, label, kind, JSON.stringify(options)]
+            );
+            summary.syncedFields += 1;
+          } else {
+            sortOrder += 1;
+            const fieldKey = fieldKeyFromLabel(label);
+            await client.query(
+              `INSERT INTO field_configs (form_type_key, field_key, label, kind, required, visible_to_business, editable_by_business, internal, show_in_list, sort_order, options, feishu_field_name)
+               VALUES ($1,$2,$3,$4,false,true,true,false,false,$5,$6,$3)
+               ON CONFLICT (form_type_key, field_key) DO UPDATE SET
+                 label=EXCLUDED.label,
+                 kind=EXCLUDED.kind,
+                 options=EXCLUDED.options,
+                 feishu_field_name=EXCLUDED.feishu_field_name,
+                 updated_at=now()`,
+              [localType.key, fieldKey, label, kind, sortOrder, JSON.stringify(options)]
+            );
+            summary.createdFields += 1;
+          }
+        }
+      }
+
+      await client.query(
+        `INSERT INTO audit_logs (entity_type, action, new_value, actor_user_id, actor_name)
+         VALUES ('bitable_schema', 'sync_from_bitable', $1, $2, $3)`,
+        [JSON.stringify(summary), request.user.id, request.user.name]
+      );
+    });
+
+    return summary;
   });
 
   app.patch("/api/admin/system-owners/:id", async (request) => {
@@ -595,7 +745,11 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/api/admin/field-configs", async (request) => {
     adminOnly(request.user.role);
     const result = await query(
-      `SELECT * FROM field_configs ORDER BY form_type_key, sort_order, label`
+      `SELECT field_configs.*
+         FROM field_configs
+         JOIN form_types ON form_types.key = field_configs.form_type_key
+        WHERE form_types.enabled = true
+        ORDER BY field_configs.form_type_key, field_configs.sort_order, field_configs.label`
     );
     return result.rows;
   });

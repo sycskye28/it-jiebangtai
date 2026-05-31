@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bell, ClipboardList, Clock3, FilePlus2, Filter, LayoutDashboard, LogIn, MessageSquare, Paperclip, PencilLine, Save, Search, Settings2, ShieldCheck, Sparkles, UploadCloud, UserRoundCog } from "lucide-react";
+import { Bell, ClipboardList, Clock3, FilePlus2, Filter, LayoutDashboard, LogIn, MessageSquare, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Sparkles, UploadCloud, UserRoundCog } from "lucide-react";
 import type { CurrentUser, FieldConfig, FormType, RecordDetail, RecordSummary } from "@it/shared";
 import { api, storeCurrentUser } from "./api";
 import "./styles.css";
@@ -66,7 +66,14 @@ function App() {
     api.formConfig(recordDetail.typeKey).then((config) => setDetailFields(config.fields)).catch((error) => setToast(error.message));
   }, [recordDetail?.id, recordDetail?.typeKey]);
 
+  useEffect(() => {
+    if (currentUser && currentUser.role !== "admin" && view === "admin") {
+      setView("submit");
+    }
+  }, [currentUser, view]);
+
   const selectedType = formTypes.find((item) => item.key === activeType);
+  const isAdmin = currentUser?.role === "admin";
   const stats = useMemo(() => {
     const open = records.filter((record) => record.status !== "已关闭").length;
     const delayed = records.filter((record) => record.status.includes("延期") || record.status.includes("异常")).length;
@@ -86,7 +93,7 @@ function App() {
         </div>
         <button className={view === "submit" ? "nav active" : "nav"} onClick={() => setView("submit")}><FilePlus2 size={18} />提交</button>
         <button className={view === "records" ? "nav active" : "nav"} onClick={() => setView("records")}><ClipboardList size={18} />记录</button>
-        <button className={view === "admin" ? "nav active" : "nav"} onClick={() => setView("admin")}><Settings2 size={18} />后台</button>
+        {isAdmin ? <button className={view === "admin" ? "nav active" : "nav"} onClick={() => setView("admin")}><Settings2 size={18} />后台</button> : null}
         <div className="rail-card">
           <Bell size={18} />
           <span>关键节点会通知提交人与系统管理员。</span>
@@ -100,7 +107,6 @@ function App() {
             <h1>{view === "submit" ? "统一提交入口" : view === "records" ? "进度追踪" : "配置后台"}</h1>
           </div>
           <div className="top-actions">
-            <div className="search"><Search size={16} /><span>按系统、状态、负责人筛选</span></div>
             <AuthBadge user={currentUser} onToast={setToast} />
           </div>
         </header>
@@ -155,7 +161,10 @@ function App() {
             }}
           />
         ) : null}
-        {!loading && view === "admin" ? (requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? null : <AdminPanel />) : null}
+        {!loading && view === "admin" ? (
+          requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? null :
+          isAdmin ? <AdminPanel /> : <div className="empty">你当前没有后台管理权限。</div>
+        ) : null}
       </section>
       {toast ? <button className="toast" onClick={() => setToast("")}>{toast}</button> : null}
     </main>
@@ -265,11 +274,11 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
       <section className="panel helper-panel">
         <h3>提交后自动完成</h3>
         <ul className="timeline-list">
-          <li><span />记录写入规范业务表</li>
-          <li><span />按所属系统匹配管理员</li>
-          <li><span />未匹配时转彭涛</li>
-          <li><span />通知提交人和系统管理员</li>
-          <li><span />生成审计与进度时间线</li>
+          <li><span /><div className="timeline-copy">记录写入规范业务表</div></li>
+          <li><span /><div className="timeline-copy">按所属系统匹配管理员</div></li>
+          <li><span /><div className="timeline-copy">未匹配时转彭涛</div></li>
+          <li><span /><div className="timeline-copy">通知提交人和系统管理员</div></li>
+          <li><span /><div className="timeline-copy">生成审计与进度时间线</div></li>
         </ul>
       </section>
     </div>
@@ -434,7 +443,15 @@ function RecordsPanel({ records, formTypes, owners, fields, selectedRecordId, de
             ) : null}
             <h3>时间线</h3>
             <ul className="timeline-list compact">
-              {detail.timeline.map((item) => <li key={item.id}><span />{item.title}<small>{item.body}</small></li>)}
+              {detail.timeline.map((item) => (
+                <li key={item.id}>
+                  <span />
+                  <div className="timeline-copy">
+                    <strong>{item.title}</strong>
+                    <small>{item.body}</small>
+                  </div>
+                </li>
+              ))}
             </ul>
             <form className="comment-box" onSubmit={async (event) => {
               event.preventDefault();
@@ -503,6 +520,8 @@ function AdminPanel() {
   const [activeFormType, setActiveFormType] = useState("demand");
   const [newType, setNewType] = useState({ key: "", name: "", description: "" });
   const [newField, setNewField] = useState({ label: "", kind: "text", required: false, visibleToBusiness: true, editableByBusiness: true, showInList: false, options: "" });
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState("");
 
   async function refreshAdmin() {
     Promise.all([api.formTypes(), api.fieldConfigs(), api.owners(), api.accessRequests()])
@@ -524,7 +543,26 @@ function AdminPanel() {
   return (
     <div className="admin-grid">
       <section className="panel admin-wide">
-        <div className="panel-title"><h2>提交表单配置</h2><p>控制用户提交时显示哪些字段、哪些字段必填，配置会同时影响 Web 和小程序动态表单。</p></div>
+        <div className="panel-title admin-title-row">
+          <div>
+            <h2>提交表单配置</h2>
+            <p>控制用户提交时显示哪些字段、哪些字段必填，配置会同时影响 Web 和小程序动态表单。</p>
+          </div>
+          <button className="sync-button" type="button" disabled={syncing} onClick={async () => {
+            setSyncing(true);
+            try {
+              const result = await api.syncBitableSchema();
+              setSyncResult(`已同步：更新 ${result.syncedFields} 个字段，新增 ${result.createdFields} 个字段，删除 ${result.removedFields} 个字段，禁用 ${result.disabledFormTypes.length} 个类型，导入 ${result.importedFormTypes.length} 个类型`);
+              await refreshAdmin();
+              if (result.disabledFormTypes.includes(formTypes.find((type) => type.key === activeFormType)?.name ?? "")) {
+                setActiveFormType("demand");
+              }
+            } finally {
+              setSyncing(false);
+            }
+          }}>{syncing ? "同步中..." : "从多维表格同步"}</button>
+        </div>
+        {syncResult ? <div className="sync-result">{syncResult}</div> : null}
         <div className="segmented">
           {formTypes.map((type) => (
             <button key={type.key} className={activeFormType === type.key ? "selected" : ""} onClick={() => setActiveFormType(type.key)}>{type.name}</button>
