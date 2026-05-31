@@ -1,0 +1,14 @@
+.DS_Store
+node_modules
+dist
+.swc
+.env
+.env.local
+.env.*.local
+coverage
+*.log
+*.xlsx
+apps/api/import-report*.json
+apps/api/uploads
+uploads
+postgres-data

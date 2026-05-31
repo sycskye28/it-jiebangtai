@@ -1,0 +1,26 @@
+{
+  "name": "it-jiebangtai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IT demand and issue management system for Feishu and web.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/api & npm run dev -w apps/web",
+    "build": "npm run build -w packages/shared && npm run build -w apps/api && npm run build -w apps/web",
+    "typecheck": "npm run typecheck -w packages/shared && npm run typecheck -w apps/api && npm run typecheck -w apps/web",
+    "db:migrate": "npm run db:migrate -w apps/api",
+    "db:seed": "npm run db:seed -w apps/api",
+    "import:excel": "npm run import:excel -w apps/api --",
+    "lint": "npm run lint -w apps/api && npm run lint -w apps/web"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^7.29.7",
+    "playwright-core": "^1.60.0"
+  }
+}

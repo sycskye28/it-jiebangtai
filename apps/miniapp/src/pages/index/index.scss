@@ -1,0 +1,87 @@
+.page {
+  min-height: 100vh;
+  padding: 32px;
+  background: #eef1eb;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 26px;
+}
+
+.eyebrow {
+  color: #bd6f3a;
+  font-size: 22px;
+}
+
+.title {
+  color: #17201b;
+  font-size: 52px;
+  font-weight: 700;
+}
+
+.subtitle {
+  color: #6e766f;
+  font-size: 26px;
+  line-height: 1.45;
+}
+
+.tabs {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.tabs button,
+.submit {
+  border-radius: 12px;
+}
+
+.tabs button {
+  background: #fbfcf8;
+  color: #6e766f;
+}
+
+.tabs button.active {
+  background: #17201b;
+  color: #f7f3df;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  background: #fbfcf8;
+  border: 1px solid #d9dfd7;
+  border-radius: 12px;
+}
+
+.field text {
+  font-size: 24px;
+  color: #3e473f;
+}
+
+.field input,
+.field textarea,
+.picker {
+  min-height: 72px;
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 16px;
+  font-size: 28px;
+}
+
+.submit {
+  margin-top: 26px;
+  background: #42614c;
+  color: white;
+}

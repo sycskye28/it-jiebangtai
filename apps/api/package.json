@@ -1,0 +1,35 @@
+{
+  "name": "apps-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --ext .ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts",
+    "import:excel": "tsx scripts/import-excel.ts",
+    "feishu:sync-schema": "tsx scripts/sync-bitable-schema.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@fastify/multipart": "^9.0.3",
+    "@fastify/sensible": "^6.0.2",
+    "@it/shared": "file:../../packages/shared",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "pg": "^8.13.3",
+    "tsx": "^4.19.3",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.8.3"
+  }
+}
