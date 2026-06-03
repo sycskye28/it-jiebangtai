@@ -288,8 +288,35 @@ export class FeishuService {
     });
   }
 
-  async listBitableRecords(tableId: string, pageSize = 10) {
-    return this.bitableRequest<{ items: Array<Record<string, unknown>>; page_token?: string; has_more?: boolean }>(`/tables/${tableId}/records?page_size=${pageSize}`);
+  async listBitableRecords(tableId: string, pageSize = 10, pageToken?: string) {
+    const search = new URLSearchParams({ page_size: String(pageSize) });
+    if (pageToken) search.set("page_token", pageToken);
+    return this.bitableRequest<{ items: Array<Record<string, unknown>>; page_token?: string; has_more?: boolean }>(`/tables/${tableId}/records?${search}`);
+  }
+
+  async listAllBitableRecordIds(tableId: string) {
+    const ids = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      const page = await this.listBitableRecords(tableId, 500, pageToken);
+      for (const item of page.items ?? []) {
+        const recordId = String((item as any).record_id ?? "");
+        if (recordId) ids.add(recordId);
+      }
+      pageToken = page.has_more ? page.page_token : undefined;
+    } while (pageToken);
+    return ids;
+  }
+
+  async listAllBitableRecords(tableId: string) {
+    const records: Array<Record<string, unknown>> = [];
+    let pageToken: string | undefined;
+    do {
+      const page = await this.listBitableRecords(tableId, 500, pageToken);
+      records.push(...(page.items ?? []));
+      pageToken = page.has_more ? page.page_token : undefined;
+    } while (pageToken);
+    return records;
   }
 
   tableIdForType(typeKey: string) {
@@ -310,6 +337,12 @@ export class FeishuService {
     return this.bitableRequest<{ record: { record_id: string; fields: Record<string, unknown> } }>(`/tables/${tableId}/records/${recordId}`, {
       method: "PUT",
       body: JSON.stringify({ fields })
+    });
+  }
+
+  async deleteBitableRecord(tableId: string, recordId: string) {
+    return this.bitableRequest<Record<string, unknown>>(`/tables/${tableId}/records/${recordId}`, {
+      method: "DELETE"
     });
   }
 
@@ -340,6 +373,24 @@ export class FeishuService {
     return {
       fileToken: data.data.file_token
     };
+  }
+
+  async downloadBitableAttachment(fileToken: string) {
+    if (!config.feishu.bitableAppToken) {
+      throw new Error("FEISHU_BITABLE_APP_TOKEN is not configured.");
+    }
+    const token = await this.getTenantAccessToken();
+    const response = await fetch(`https://open.feishu.cn/open-apis/drive/v1/medias/${encodeURIComponent(fileToken)}/download`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token}`
+      }
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => response.statusText);
+      throw new Error(`Feishu attachment download failed: ${text || response.statusText}`);
+    }
+    return response;
   }
 
   async bitableStatus() {

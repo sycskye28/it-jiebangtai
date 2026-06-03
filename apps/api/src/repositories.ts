@@ -32,32 +32,48 @@ function isSuperAdminIdentity(feishuUserId: string, employeeNo?: string | null, 
   return normalizedId === "a10986" || normalizedEmployeeNo === "a10986" || name === "沈昀初";
 }
 
+function isInfoDigitalDepartment(department?: string | null) {
+  return String(department ?? "").trim() === "信息数字化部";
+}
+
 export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   const openId = String(userInfo.open_id ?? userInfo.openId ?? "");
   const userId = String(userInfo.user_id ?? userInfo.userId ?? userInfo.employee_no ?? userInfo.employeeNo ?? openId);
   const unionId = userInfo.union_id ? String(userInfo.union_id) : null;
   const employeeNo = userInfo.employee_no ? String(userInfo.employee_no) : userId;
   const name = String(userInfo.name ?? userInfo.en_name ?? employeeNo ?? userId);
+  const department = userInfo.department
+    ? String(userInfo.department)
+    : userInfo.department_name
+      ? String(userInfo.department_name)
+      : userInfo.departmentName
+        ? String(userInfo.departmentName)
+        : null;
   const avatarUrl = userInfo.avatar_url ? String(userInfo.avatar_url) : null;
-  const role: AuthUser["role"] = isSuperAdminIdentity(userId || openId, employeeNo, name) ? "admin" : "business";
+  const role: AuthUser["role"] = isSuperAdminIdentity(userId || openId, employeeNo, name)
+    ? "admin"
+    : isInfoDigitalDepartment(department)
+      ? "system_owner"
+      : "business";
 
   if (!userId && !openId) {
     throw new Error("Feishu user info does not contain user_id or open_id.");
   }
 
   const result = await query<DbUser>(
-    `INSERT INTO users (feishu_user_id, feishu_open_id, feishu_union_id, employee_no, name, avatar_url, role, access_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+    `INSERT INTO users (feishu_user_id, feishu_open_id, feishu_union_id, employee_no, name, department, avatar_url, role, access_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
      ON CONFLICT (feishu_user_id) DO UPDATE
        SET feishu_open_id = EXCLUDED.feishu_open_id,
            feishu_union_id = EXCLUDED.feishu_union_id,
            employee_no = EXCLUDED.employee_no,
            name = EXCLUDED.name,
+           department = EXCLUDED.department,
            avatar_url = EXCLUDED.avatar_url,
            role = EXCLUDED.role,
            updated_at = now()
      RETURNING *`,
-    [userId || openId, openId || null, unionId, employeeNo || null, name, avatarUrl, role]
+    [userId || openId, openId || null, unionId, employeeNo || null, name, department, avatarUrl, role]
   );
 
   return toAuthUser(result.rows[0]);
@@ -75,7 +91,15 @@ export async function ensureDevUser(headers: Record<string, string | string[] | 
   const feishuUserId = String(headers["x-dev-user-id"] ?? "dev-admin");
   const name = decodeHeaderValue(String(headers["x-dev-user-name"] ?? "%E5%BD%AD%E6%B6%9B"));
   const department = decodeHeaderValue(String(headers["x-dev-department"] ?? "IT"));
-  const role: AuthUser["role"] = isSuperAdminIdentity(feishuUserId, feishuUserId, name) ? "admin" : "business";
+  const requestedRole = String(headers["x-dev-role"] ?? "");
+  const isSimulation = requestedRole === "business" || requestedRole === "system_owner";
+  const role: AuthUser["role"] = !isSimulation && isSuperAdminIdentity(feishuUserId, feishuUserId, name)
+    ? "admin"
+    : requestedRole === "external"
+      ? "external"
+      : isInfoDigitalDepartment(department)
+        ? "system_owner"
+        : "business";
 
   const result = await query<DbUser>(
     `INSERT INTO users (feishu_user_id, name, department, role, access_status)
@@ -140,7 +164,7 @@ export async function getFormType(typeKey: string, client?: pg.PoolClient) {
 export async function getFieldConfigs(typeKey: string) {
   const result = await query(
     `SELECT id, form_type_key, field_key, label, kind, required, visible_to_business,
-            editable_by_business, internal, show_in_list, sort_order, options, feishu_field_name
+            editable_by_business, business_visible, internal, show_in_list, sort_order, options, feishu_field_name
        FROM field_configs
       WHERE form_type_key = $1
       ORDER BY sort_order, label`,
@@ -155,6 +179,7 @@ export async function getFieldConfigs(typeKey: string) {
     required: row.required,
     visibleToBusiness: row.visible_to_business,
     editableByBusiness: row.editable_by_business,
+    businessVisible: row.business_visible,
     internal: row.internal,
     showInList: row.show_in_list,
     sortOrder: row.sort_order,
@@ -231,6 +256,6 @@ export async function listSystemOwners() {
 
 export function canViewRecord(user: AuthUser, record: any) {
   if (user.role === "admin") return true;
-  if (user.role === "system_owner") return record.owner_name === user.name;
-  return record.submitter_user_id === user.id;
+  if (user.role === "system_owner") return true;
+  return true;
 }

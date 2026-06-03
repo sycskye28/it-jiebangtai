@@ -37,6 +37,6 @@ export const config = {
     issueTableId: process.env.FEISHU_ISSUE_TABLE_ID ?? "",
     systemOwnerTableId: process.env.FEISHU_SYSTEM_OWNER_TABLE_ID ?? "",
     requireRealApi: process.env.FEISHU_REQUIRE_REAL_API === "true",
-    messageReceiveIdType: process.env.FEISHU_MESSAGE_RECEIVE_ID_TYPE ?? "open_id"
+    messageReceiveIdType: process.env.FEISHU_MESSAGE_RECEIVE_ID_TYPE ?? "user_id"
   }
 };

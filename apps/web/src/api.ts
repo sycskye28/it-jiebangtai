@@ -1,6 +1,6 @@
 import type { FieldConfig, FormType, RecordDetail, RecordSummary, CurrentUser } from "@it/shared";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
 function headerSafe(value: string) {
   return encodeURIComponent(value);
@@ -10,6 +10,15 @@ export function storeCurrentUser(user: CurrentUser) {
   localStorage.setItem("devUserId", user.feishuUserId);
   localStorage.setItem("devUserName", user.name);
   localStorage.setItem("devRole", user.role);
+  if (user.department) localStorage.setItem("devDepartment", user.department);
+  else localStorage.removeItem("devDepartment");
+}
+
+export function setDevIdentity(identity: { feishuUserId: string; name: string; role: string; department: string }) {
+  localStorage.setItem("devUserId", identity.feishuUserId);
+  localStorage.setItem("devUserName", identity.name);
+  localStorage.setItem("devRole", identity.role);
+  localStorage.setItem("devDepartment", identity.department);
 }
 
 async function request<T>(path: string, options: RequestInit = {}) {
@@ -21,6 +30,7 @@ async function request<T>(path: string, options: RequestInit = {}) {
       "x-dev-user-id": localStorage.getItem("devUserId") ?? "dev-admin",
       "x-dev-user-name": headerSafe(localStorage.getItem("devUserName") ?? "彭涛"),
       "x-dev-role": localStorage.getItem("devRole") ?? "business",
+      "x-dev-department": headerSafe(localStorage.getItem("devDepartment") ?? "IT"),
       ...(options.headers ?? {})
     }
   });
@@ -50,6 +60,21 @@ export const api = {
     method: "PATCH",
     body: JSON.stringify({ values })
   }),
+  cloneRecordToSystems: (id: string, systems: string[]) => request<RecordSummary[]>(`/api/records/${id}/clone-systems`, {
+    method: "POST",
+    body: JSON.stringify({ systems })
+  }),
+  convertRecord: (id: string, typeKey: string) => request<RecordSummary>(`/api/records/${id}/convert`, {
+    method: "POST",
+    body: JSON.stringify({ typeKey })
+  }),
+  deleteRecord: (id: string) => request<{ ok: boolean; id: string; recordNo: string | null }>(`/api/records/${id}`, {
+    method: "DELETE"
+  }),
+  bulkDeleteRecords: (recordIds: string[]) => request<{ ok: boolean; deleted: number; requested: number; feishuWarnings: number }>("/api/admin/records/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ recordIds })
+  }),
   addComment: (id: string, body: string) => request(`/api/records/${id}/comments`, {
     method: "POST",
     body: JSON.stringify({ body })
@@ -76,13 +101,30 @@ export const api = {
     method: "PATCH",
     body: JSON.stringify(values)
   }),
+  createOwner: (values: Record<string, unknown>) => request<any>("/api/admin/system-owners", {
+    method: "POST",
+    body: JSON.stringify(values)
+  }),
+  updateOwner: (id: string, values: Record<string, unknown>) => request<any>(`/api/admin/system-owners/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(values)
+  }),
   syncBitableSchema: () => request<{
     disabledFormTypes: string[];
     importedFormTypes: string[];
     syncedFields: number;
     createdFields: number;
     removedFields: number;
+    removedRecords: number;
   }>("/api/admin/feishu/sync-from-bitable", {
+    method: "POST",
+    body: JSON.stringify({})
+  }),
+  syncBitableRecords: () => request<{
+    syncedTypes: string[];
+    importedRecords: number;
+    removedLocalRecords: number;
+  }>("/api/admin/feishu/sync-records-from-bitable", {
     method: "POST",
     body: JSON.stringify({})
   }),

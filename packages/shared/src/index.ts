@@ -27,6 +27,7 @@ export const fieldConfigSchema = z.object({
   required: z.boolean(),
   visibleToBusiness: z.boolean(),
   editableByBusiness: z.boolean(),
+  businessVisible: z.boolean(),
   internal: z.boolean(),
   showInList: z.boolean(),
   sortOrder: z.number(),
@@ -60,11 +61,14 @@ export type CurrentUser = z.infer<typeof userSchema>;
 
 export const recordSummarySchema = z.object({
   id: z.string(),
+  recordNo: z.string().nullable(),
   typeKey: z.string(),
   title: z.string(),
   systemName: z.string(),
   status: z.string(),
   priority: z.string().nullable(),
+  submitterUserId: z.string().nullable(),
+  submitterFeishuUserId: z.string().nullable(),
   submitterName: z.string(),
   ownerName: z.string().nullable(),
   createdAt: z.string(),

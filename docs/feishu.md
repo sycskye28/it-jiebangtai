@@ -16,13 +16,7 @@
 FEISHU_REQUIRE_REAL_API=true
 ```
 
-当前消息测试先使用 `open_id`：
-
-```bash
-FEISHU_MESSAGE_RECEIVE_ID_TYPE=open_id
-```
-
-等通讯录 `user_id` 权限申请完成后，可以切换为：
+当前消息通知使用 `user_id`，也就是飞书通讯录用户 ID/工号：
 
 ```bash
 FEISHU_MESSAGE_RECEIVE_ID_TYPE=user_id
