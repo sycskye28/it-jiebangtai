@@ -1,12 +1,36 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bell, ClipboardList, Clock3, Download, Eye, FilePlus2, Filter, GripVertical, LayoutDashboard, LogIn, MessageSquare, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
+import { Bell, ClipboardList, Clock3, Download, Eye, FilePlus2, Filter, GripVertical, LayoutDashboard, LoaderCircle, LogIn, MessageSquare, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Trash2, UploadCloud } from "lucide-react";
 import type { CurrentUser, FieldConfig, FormType, RecordDetail, RecordSummary } from "@it/shared";
 import { API_BASE_URL, api, setDevIdentity, storeCurrentUser } from "./api";
 import "./styles.css";
 
 type ViewKey = "submit" | "records" | "admin";
 const requireFeishuLogin = import.meta.env.VITE_REQUIRE_FEISHU_LOGIN !== "false";
+const feishuWebAppAutoLogin = import.meta.env.VITE_FEISHU_WEBAPP_AUTO_LOGIN === "true";
+
+function isFeishuClient() {
+  if (typeof navigator === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("feishu_webapp") === "1" || /Lark|Feishu|LarkLocale/i.test(navigator.userAgent);
+}
+
+function currentRedirectUri() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+function isUnauthenticatedUser(user: CurrentUser | null) {
+  return !user || ["anonymous", "dev-admin"].includes(user.feishuUserId);
+}
+
+async function startFeishuLogin(onToast: (message: string) => void) {
+  const oauth = await api.feishuOAuthUrl(currentRedirectUri());
+  if (!oauth.configured) {
+    onToast("飞书应用 App ID 未配置");
+    return;
+  }
+  window.location.href = oauth.url;
+}
 
 function App() {
   const [view, setView] = useState<ViewKey>("submit");
@@ -20,6 +44,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [detailFields, setDetailFields] = useState<FieldConfig[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busyMessage, setBusyMessage] = useState("");
   const [toast, setToast] = useState("");
 
   async function refresh() {
@@ -33,12 +58,19 @@ function App() {
   }
 
   useEffect(() => {
+    const feishuRuntime = isFeishuClient();
+    document.documentElement.classList.toggle("feishu-webapp", feishuRuntime);
+    document.documentElement.classList.toggle("browser-webapp", !feishuRuntime);
+  }, []);
+
+  useEffect(() => {
     const code = new URLSearchParams(window.location.search).get("code");
     if (code) {
       api.loginFeishu(code)
         .then(({ user }) => {
           storeCurrentUser(user);
           setCurrentUser(user);
+          sessionStorage.removeItem("feishuAutoLoginStarted");
           window.history.replaceState({}, "", window.location.pathname);
           return refresh();
         })
@@ -47,6 +79,14 @@ function App() {
     }
     refresh().catch((error) => setToast(error.message));
   }, []);
+
+  useEffect(() => {
+    if (!feishuWebAppAutoLogin || !isFeishuClient()) return;
+    if (loading || !requireFeishuLogin || !isUnauthenticatedUser(currentUser)) return;
+    if (sessionStorage.getItem("feishuAutoLoginStarted")) return;
+    sessionStorage.setItem("feishuAutoLoginStarted", "1");
+    startFeishuLogin(setToast).catch((error) => setToast(error.message));
+  }, [loading, currentUser?.feishuUserId]);
 
   useEffect(() => {
     api.formConfig(activeType).then((config) => setFields(config.fields)).catch((error) => setToast(error.message));
@@ -81,13 +121,22 @@ function App() {
     return { open, delayed, mine };
   }, [records]);
 
+  async function runBusy<T>(message: string, task: () => Promise<T>) {
+    setBusyMessage(message);
+    try {
+      return await task();
+    } finally {
+      setBusyMessage("");
+    }
+  }
+
   return (
     <main className="shell">
       <aside className="rail">
         <div className="brand">
-          <div className="brand-mark"><Sparkles size={18} /></div>
+          <div className="brand-mark"><img src="/dcec-logo.png" alt="DCEC" /></div>
           <div>
-            <strong>IT 揭榜台</strong>
+            <strong>东风康明斯 IT 揭榜台</strong>
             <span>需求与问题管理</span>
           </div>
         </div>
@@ -118,11 +167,11 @@ function App() {
         </section>
 
         {loading ? <div className="empty">正在连接本地服务...</div> : null}
-        {!loading && requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? (
+        {!loading && requireFeishuLogin && isUnauthenticatedUser(currentUser) ? (
           <LoginRequiredPanel onToast={setToast} />
         ) : null}
         {!loading && view === "submit" ? (
-          requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? null :
+          requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           <SubmitPanel
             formTypes={formTypes}
             activeType={activeType}
@@ -131,16 +180,18 @@ function App() {
             owners={owners}
             onTypeChange={setActiveType}
             onSubmit={async (values) => {
-              const created = await api.createRecord(activeType, values);
-              setToast(`已提交：${created.title}`);
-              await refresh();
-              setView("records");
-              setSelectedRecordId(created.id);
+              await runBusy("正在提交并同步多维表格...", async () => {
+                const created = await api.createRecord(activeType, values);
+                setToast(`已提交：${created.title}`);
+                await refresh();
+                setView("records");
+                setSelectedRecordId(created.id);
+              });
             }}
           />
         ) : null}
         {!loading && view === "records" ? (
-          requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? null :
+          requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           <RecordsPanel
             records={records}
             formTypes={formTypes}
@@ -156,19 +207,23 @@ function App() {
               return config.fields;
             }}
             onSave={async (id, values) => {
-              await api.updateRecord(id, values);
-              setToast("记录已更新");
-              await refresh();
-              setRecordDetail(await api.record(id));
+              await runBusy("正在保存记录并更新飞书...", async () => {
+                await api.updateRecord(id, values);
+                setToast("记录已更新");
+                await refresh();
+                setRecordDetail(await api.record(id));
+              });
             }}
             onCloneSystems={async (id, systems) => {
               try {
-                const created = await api.cloneRecordToSystems(id, systems);
-                setToast(created.length ? `已生成 ${created.length} 条多系统记录` : "没有新增系统记录");
-                await refresh();
-                const nextId = created[0]?.id ?? id;
-                setSelectedRecordId(nextId);
-                setRecordDetail(await api.record(nextId));
+                await runBusy("正在生成多系统记录...", async () => {
+                  const created = await api.cloneRecordToSystems(id, systems);
+                  setToast(created.length ? `已生成 ${created.length} 条多系统记录` : "没有新增系统记录");
+                  await refresh();
+                  const nextId = created[0]?.id ?? id;
+                  setSelectedRecordId(nextId);
+                  setRecordDetail(await api.record(nextId));
+                });
               } catch (error) {
                 setToast(error instanceof Error ? error.message : "追加系统失败");
                 throw error;
@@ -176,14 +231,16 @@ function App() {
             }}
             onConvert={async (id, typeKey) => {
               try {
-                const converted = await api.convertRecord(id, typeKey);
-                setToast("提交类型已转换");
-                const config = await api.formConfig(converted.typeKey);
-                await refresh();
-                setSelectedRecordId(id);
-                setDetailFields(config.fields);
-                const nextDetail = await api.record(id);
-                setRecordDetail(nextDetail);
+                await runBusy("正在转换提交类型...", async () => {
+                  const converted = await api.convertRecord(id, typeKey);
+                  setToast("提交类型已转换");
+                  const config = await api.formConfig(converted.typeKey);
+                  await refresh();
+                  setSelectedRecordId(id);
+                  setDetailFields(config.fields);
+                  const nextDetail = await api.record(id);
+                  setRecordDetail(nextDetail);
+                });
               } catch (error) {
                 setToast(error instanceof Error ? error.message : "提交类型转换失败");
                 throw error;
@@ -194,19 +251,30 @@ function App() {
               setRecordDetail(await api.record(id));
             }}
             onSyncRecords={async () => {
-              const result = await api.syncBitableRecords();
-              setToast(`已同步记录：导入 ${result.importedRecords} 条，清理本地 ${result.removedLocalRecords} 条`);
-              setSelectedRecordId(null);
-              setRecordDetail(null);
-              await refresh();
+              await runBusy("正在从多维表格同步记录...", async () => {
+                const result = await api.syncBitableRecords();
+                setToast(`已同步记录：导入 ${result.importedRecords} 条，更新 ${result.updatedRecords} 条，清理本地 ${result.removedLocalRecords} 条`);
+                setSelectedRecordId(null);
+                setRecordDetail(null);
+                await refresh();
+              });
             }}
           />
         ) : null}
         {!loading && view === "admin" ? (
-          requireFeishuLogin && currentUser?.feishuUserId === "dev-admin" ? null :
+          requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           isAdmin ? <AdminPanel /> : <div className="empty">你当前没有后台管理权限。</div>
         ) : null}
       </section>
+      {busyMessage ? (
+        <div className="busy-overlay" aria-live="polite">
+          <div className="busy-card">
+            <LoaderCircle size={20} />
+            <strong>{busyMessage}</strong>
+            <span>请稍等，正在处理飞书和本地数据。</span>
+          </div>
+        </div>
+      ) : null}
       {toast ? <button className="toast" onClick={() => setToast("")}>{toast}</button> : null}
     </main>
   );
@@ -221,16 +289,11 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
   const simulationBackup = localStorage.getItem("superAdminSimulationBackup");
   const canSimulate = user?.role === "admin" || Boolean(simulationBackup);
   const simulationOptions = [
-    { label: "管理员", feishuUserId: "a10986", name: "数字化部测试员", role: "system_owner", department: "信息数字化部" },
+    { label: "管理员", feishuUserId: "a10986", name: "管理员测试用户", role: "system_owner", department: "管理员名单" },
     { label: "业务人员", feishuUserId: "a10986", name: "业务测试用户", role: "business", department: "生产制造部" }
   ];
   const loginWithFeishu = async () => {
-    const oauth = await api.feishuOAuthUrl();
-    if (!oauth.configured) {
-      onToast("飞书应用 App ID 未配置");
-      return;
-    }
-    window.location.href = oauth.url;
+    await startFeishuLogin(onToast);
   };
   const simulateIdentity = (identity: typeof simulationOptions[number]) => {
     if (!simulationBackup && user?.role === "admin") {
@@ -238,7 +301,7 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
         feishuUserId: user.feishuUserId,
         name: user.name,
         role: user.role,
-        department: user.department ?? "信息数字化部"
+        department: user.department ?? "管理员名单"
       }));
     }
     setDevIdentity(identity);
@@ -283,20 +346,16 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
 
 function LoginRequiredPanel({ onToast }: { onToast: (message: string) => void }) {
   const login = async () => {
-    const oauth = await api.feishuOAuthUrl();
-    if (!oauth.configured) {
-      onToast("飞书应用 App ID 未配置");
-      return;
-    }
-    window.location.href = oauth.url;
+    await startFeishuLogin(onToast);
   };
 
   return (
     <section className="panel login-panel">
+      <img className="login-logo" src="/dcec-logo.png" alt="DCEC" />
       <ShieldCheck size={28} />
-      <h2>需要飞书扫码登录</h2>
-      <p>登录后系统会按飞书身份判断超级管理员、管理员和业务人员权限。</p>
-      <button className="command" type="button" onClick={login}><LogIn size={18} />飞书扫码登录</button>
+      <h2>需要飞书登录</h2>
+      <p>在飞书客户端内会使用当前网页应用地址登录；在浏览器中会跳转到飞书网页登录。</p>
+      <button className="command" type="button" onClick={login}><LogIn size={18} />飞书登录</button>
     </section>
   );
 }
@@ -311,6 +370,7 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
   onSubmit: (values: Record<string, unknown>) => Promise<void>;
 }) {
   const [values, setValues] = useState<Record<string, unknown>>({});
+  const [submitting, setSubmitting] = useState(false);
   const businessFields = fields.filter((field) => field.visibleToBusiness && field.editableByBusiness);
 
   useEffect(() => {
@@ -336,7 +396,12 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
         </div>
         <form className="dynamic-form" onSubmit={async (event) => {
           event.preventDefault();
-          await onSubmit(values);
+          setSubmitting(true);
+          try {
+            await onSubmit(values);
+          } finally {
+            setSubmitting(false);
+          }
         }}>
           {businessFields.map((field) => (
             <DynamicField
@@ -353,7 +418,10 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
               }}
             />
           ))}
-          <button className="command" type="submit"><FilePlus2 size={18} />提交并自动分派</button>
+          <button className="command" type="submit" disabled={submitting}>
+            {submitting ? <LoaderCircle size={18} /> : <FilePlus2 size={18} />}
+            {submitting ? "提交中..." : "提交并自动分派"}
+          </button>
         </form>
       </section>
     </div>
@@ -398,18 +466,18 @@ function absoluteApiUrl(pathOrUrl: string) {
 
 function attachmentLinks(item: AttachmentValue) {
   const encodedName = encodeURIComponent(item.name || "附件");
+  if (item.fileToken) {
+    const base = `${API_BASE_URL}/api/feishu/attachments/${encodeURIComponent(item.fileToken)}/download?name=${encodedName}`;
+    return {
+      previewUrl: `${base}&disposition=inline`,
+      downloadUrl: `${base}&disposition=attachment`
+    };
+  }
   if (item.url) {
     const separator = item.url.includes("?") ? "&" : "?";
     const previewPath = `${item.url}${separator}name=${encodedName}&disposition=inline`;
     const downloadPath = `${item.url}${separator}name=${encodedName}&disposition=attachment`;
     return { previewUrl: absoluteApiUrl(previewPath), downloadUrl: absoluteApiUrl(downloadPath) };
-  }
-  if (item.fileToken) {
-    const base = `${API_BASE_URL}/api/feishu/attachments/${encodeURIComponent(item.fileToken)}/download?name=${encodedName}`;
-    return {
-      previewUrl: `${base}&disposition=inline`,
-      downloadUrl: base
-    };
   }
   return { previewUrl: "", downloadUrl: "" };
 }
@@ -460,6 +528,19 @@ function formatFieldValue(value: unknown) {
   }
   if (value && typeof value === "object") return JSON.stringify(value);
   return String(value ?? "");
+}
+
+function formatTimelineDate(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(new Date(value));
 }
 
 function typeTone(typeKey: string) {
@@ -557,7 +638,7 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
   const typeNameByKey = new Map(formTypes.map((type) => [type.key, type.name]));
   const typeName = (typeKey: string) => typeNameByKey.get(typeKey) ?? typeKey;
   const summaryFields = fields
-    .filter((field) => field.showInList || ["title", "system", "status", "description"].includes(field.fieldKey));
+    .filter((field) => field.businessVisible);
   const filteredRecords = records.filter((record) => {
     if (shouldFilterMine && currentUser) {
       const mine = record.submitterUserId === currentUser.id
@@ -701,6 +782,9 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
                   <div className="timeline-copy">
                     <strong>{item.title}</strong>
                     <small>{item.body}</small>
+                    <small className="timeline-meta">
+                      {item.actorName ? `${item.actorName} · ` : ""}{formatTimelineDate(item.createdAt)}
+                    </small>
                   </div>
                 </li>
               ))}
@@ -734,6 +818,9 @@ function RecordEditor({ detail, owners, formTypes, fields, onSave, onCloneSystem
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [cloneSystem, setCloneSystem] = useState("");
   const [targetType, setTargetType] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [cloning, setCloning] = useState(false);
+  const [converting, setConverting] = useState(false);
   const editableFields = fields.filter((field) => field.visibleToBusiness);
   const extraSystemOptions = owners
     .map((owner) => owner.systemName)
@@ -757,7 +844,15 @@ function RecordEditor({ detail, owners, formTypes, fields, onSave, onCloneSystem
           <option value="">选择系统</option>
           {extraSystemOptions.map((systemName) => <option key={systemName} value={systemName}>{systemName}</option>)}
         </select>
-        <button type="button" disabled={!cloneSystem} onClick={() => onCloneSystems(detail.id, [cloneSystem])}>生成记录</button>
+        <button type="button" disabled={!cloneSystem || cloning} onClick={async () => {
+          setCloning(true);
+          try {
+            await onCloneSystems(detail.id, [cloneSystem]);
+            setCloneSystem("");
+          } finally {
+            setCloning(false);
+          }
+        }}>{cloning ? "生成中..." : "生成记录"}</button>
         <div>
           <span>转换类型</span>
           <strong>业务选错时，可把当前记录转为其他提交类型。</strong>
@@ -766,11 +861,24 @@ function RecordEditor({ detail, owners, formTypes, fields, onSave, onCloneSystem
           <option value="">选择类型</option>
           {targetTypeOptions.map((type) => <option key={type.key} value={type.key}>{type.name}</option>)}
         </select>
-        <button type="button" disabled={!targetType} onClick={() => onConvert(detail.id, targetType)}>转换</button>
+        <button type="button" disabled={!targetType || converting} onClick={async () => {
+          setConverting(true);
+          try {
+            await onConvert(detail.id, targetType);
+            setTargetType("");
+          } finally {
+            setConverting(false);
+          }
+        }}>{converting ? "转换中..." : "转换"}</button>
       </div>
       <form className="edit-panel" onSubmit={async (event) => {
         event.preventDefault();
-        await onSave(detail.id, values);
+        setSaving(true);
+        try {
+          await onSave(detail.id, values);
+        } finally {
+          setSaving(false);
+        }
       }}>
         <div className="edit-title"><PencilLine size={18} /><h3>IT 处理修改</h3></div>
       {editableFields.map((field) => (
@@ -792,7 +900,10 @@ function RecordEditor({ detail, owners, formTypes, fields, onSave, onCloneSystem
           }}
         />
       ))}
-        <button className="command compact-command" type="submit"><Save size={16} />保存修改</button>
+        <button className="command compact-command" type="submit" disabled={saving}>
+          {saving ? <LoaderCircle size={16} /> : <Save size={16} />}
+          {saving ? "保存中..." : "保存修改"}
+        </button>
       </form>
     </div>
   );
@@ -802,25 +913,40 @@ function AdminPanel() {
   const [fields, setFields] = useState<any[]>([]);
   const [formTypes, setFormTypes] = useState<FormType[]>([]);
   const [owners, setOwners] = useState<any[]>([]);
+  const [adminMembers, setAdminMembers] = useState<any[]>([]);
   const [adminRecords, setAdminRecords] = useState<RecordSummary[]>([]);
   const [activeFormType, setActiveFormType] = useState("demand");
   const [newType, setNewType] = useState({ key: "", name: "", description: "" });
-  const [newField, setNewField] = useState({ label: "", kind: "text", required: false, visibleToBusiness: true, editableByBusiness: true, showInList: false, options: "" });
+  const [newField, setNewField] = useState({
+    label: "",
+    kind: "text",
+    required: false,
+    visibleToBusiness: true,
+    editableByBusiness: true,
+    businessVisible: true,
+    options: ""
+  });
   const [newOwner, setNewOwner] = useState({ systemName: "", ownerName: "", ownerFeishuUserId: "", consultantNames: "" });
+  const [newAdminMember, setNewAdminMember] = useState({ name: "", feishuUserId: "", employeeNo: "", note: "" });
   const [recordFilters, setRecordFilters] = useState({ typeKey: "", systemName: "", query: "" });
   const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
   const [deletingRecords, setDeletingRecords] = useState(false);
+  const [creatingOwner, setCreatingOwner] = useState(false);
+  const [creatingAdminMember, setCreatingAdminMember] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [importingConfig, setImportingConfig] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState("");
   const [draggingFieldId, setDraggingFieldId] = useState<string | null>(null);
 
   async function refreshAdmin() {
-    Promise.all([api.formTypes(), api.fieldConfigs(), api.owners(), api.records()])
-      .then(([typeData, fieldData, ownerData, recordData]) => {
+    Promise.all([api.formTypes(), api.fieldConfigs(), api.owners(), api.records(), api.adminMembers()])
+      .then(([typeData, fieldData, ownerData, recordData, adminMemberData]) => {
         setFormTypes(typeData);
         setFields(fieldData);
         setOwners(ownerData);
         setAdminRecords(recordData);
+        setAdminMembers(adminMemberData);
       })
       .catch(() => undefined);
   }
@@ -866,8 +992,68 @@ function AdminPanel() {
     await refreshAdmin();
   }
 
+  async function downloadConfigBackup() {
+    setSavingConfig(true);
+    try {
+      const backup = await api.exportConfig();
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `it-jiebangtai-config-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setSyncResult("配置已导出，请妥善保存下载的 JSON 文件。");
+    } finally {
+      setSavingConfig(false);
+    }
+  }
+
+  async function importConfigBackup(file: File) {
+    setImportingConfig(true);
+    try {
+      const backup = JSON.parse(await file.text());
+      const result = await api.importConfig(backup);
+      setSyncResult(`配置已恢复：表单 ${result.formTypes}，字段 ${result.fieldConfigs}，系统管理员 ${result.systemOwners}，管理员名单 ${result.adminMembers}，通知规则 ${result.notificationRules}`);
+      await refreshAdmin();
+    } catch (error) {
+      setSyncResult(error instanceof Error ? `配置导入失败：${error.message}` : "配置导入失败，请检查 JSON 文件。");
+    } finally {
+      setImportingConfig(false);
+    }
+  }
+
   return (
     <div className="admin-grid">
+      <section className="panel admin-wide config-backup-panel">
+        <div className="panel-title admin-title-row">
+          <div>
+            <h2>配置备份</h2>
+            <p>保存后台配置到本地 JSON；数据库或 Docker 卷异常后可导入恢复。</p>
+          </div>
+          <div className="backup-actions">
+            <button className="sync-button" type="button" disabled={savingConfig} onClick={downloadConfigBackup}>
+              <Download size={16} />{savingConfig ? "保存中..." : "保存配置"}
+            </button>
+            <label className={importingConfig ? "sync-button disabled" : "sync-button"}>
+              <UploadCloud size={16} />{importingConfig ? "导入中..." : "导入配置"}
+              <input
+                type="file"
+                accept="application/json,.json"
+                disabled={importingConfig}
+                onChange={async (event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  await importConfigBackup(file);
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      </section>
       <section className="panel admin-wide record-admin-panel">
         <div className="panel-title admin-title-row">
           <div>
@@ -973,11 +1159,19 @@ function AdminPanel() {
             required: newField.required,
             visibleToBusiness: newField.visibleToBusiness,
             editableByBusiness: newField.editableByBusiness,
-            showInList: newField.showInList,
+            businessVisible: newField.businessVisible,
             options: newField.options.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean),
             createBitableField: true
           });
-          setNewField({ label: "", kind: "text", required: false, visibleToBusiness: true, editableByBusiness: true, showInList: false, options: "" });
+          setNewField({
+            label: "",
+            kind: "text",
+            required: false,
+            visibleToBusiness: true,
+            editableByBusiness: true,
+            businessVisible: true,
+            options: ""
+          });
           await refreshAdmin();
         }}>
           <strong>新增字段</strong>
@@ -996,7 +1190,7 @@ function AdminPanel() {
           <label><input type="checkbox" checked={newField.visibleToBusiness} onChange={(event) => setNewField((current) => ({ ...current, visibleToBusiness: event.target.checked }))} />提交显示</label>
           <label><input type="checkbox" checked={newField.editableByBusiness} onChange={(event) => setNewField((current) => ({ ...current, editableByBusiness: event.target.checked }))} />提交可填</label>
           <label><input type="checkbox" checked={newField.required} onChange={(event) => setNewField((current) => ({ ...current, required: event.target.checked }))} />必填</label>
-          <label><input type="checkbox" checked={newField.showInList} onChange={(event) => setNewField((current) => ({ ...current, showInList: event.target.checked }))} />详情摘要</label>
+          <label><input type="checkbox" checked={newField.businessVisible} onChange={(event) => setNewField((current) => ({ ...current, businessVisible: event.target.checked }))} />详情摘要</label>
           <button type="submit">添加字段</button>
         </form>
         <div className="field-config-list">
@@ -1039,33 +1233,73 @@ function AdminPanel() {
                 await api.updateFieldConfig(field.id, { required: event.target.checked });
                 await refreshAdmin();
               }} />必填</label>
-              <label><input type="checkbox" checked={field.show_in_list} onChange={async (event) => {
-                await api.updateFieldConfig(field.id, { showInList: event.target.checked });
+              <label><input type="checkbox" checked={field.business_visible} onChange={async (event) => {
+                await api.updateFieldConfig(field.id, { businessVisible: event.target.checked });
                 await refreshAdmin();
               }} />详情摘要</label>
             </div>
           ))}
         </div>
       </section>
+      <section className="panel admin-wide admin-member-panel">
+        <div className="panel-title">
+          <h2>管理员名单</h2>
+          <p>用于判定谁是信息数字化部管理员。沈昀初仍是超级管理员；名单中启用的人员拥有记录处理权限，但不能进入后台。</p>
+        </div>
+        <form className="owner-create-form admin-member-create-form" onSubmit={async (event) => {
+          event.preventDefault();
+          setCreatingAdminMember(true);
+          try {
+            await api.createAdminMember({
+              name: newAdminMember.name,
+              feishuUserId: newAdminMember.feishuUserId || null,
+              employeeNo: newAdminMember.employeeNo || null,
+              note: newAdminMember.note || null,
+              enabled: true
+            });
+            setNewAdminMember({ name: "", feishuUserId: "", employeeNo: "", note: "" });
+            await refreshAdmin();
+          } finally {
+            setCreatingAdminMember(false);
+          }
+        }}>
+          <input value={newAdminMember.name} onChange={(event) => setNewAdminMember((current) => ({ ...current, name: event.target.value }))} placeholder="姓名，例如彭涛" required />
+          <input value={newAdminMember.feishuUserId} onChange={(event) => setNewAdminMember((current) => ({ ...current, feishuUserId: event.target.value }))} placeholder="user_id，手动填写" />
+          <input value={newAdminMember.employeeNo} onChange={(event) => setNewAdminMember((current) => ({ ...current, employeeNo: event.target.value }))} placeholder="工号，可选" />
+          <input value={newAdminMember.note} onChange={(event) => setNewAdminMember((current) => ({ ...current, note: event.target.value }))} placeholder="备注，例如 IT 技术" />
+          <button type="submit" disabled={creatingAdminMember}>{creatingAdminMember ? "新增中..." : "新增"}</button>
+        </form>
+        <div className="admin-list">
+          {adminMembers.map((member) => <AdminMemberRow key={member.id} member={member} onSave={async (values) => {
+            await api.updateAdminMember(member.id, values);
+            await refreshAdmin();
+          }} />)}
+        </div>
+      </section>
       <section className="panel admin-wide owner-admin-panel">
         <div className="panel-title"><h2>管理员配置</h2><p>按系统匹配信息数字化部管理员；未匹配时转彭涛。</p></div>
         <form className="owner-create-form" onSubmit={async (event) => {
           event.preventDefault();
-          await api.createOwner({
-            systemName: newOwner.systemName,
-            ownerName: newOwner.ownerName,
-            ownerFeishuUserId: newOwner.ownerFeishuUserId || null,
-            consultantNames: newOwner.consultantNames || null,
-            enabled: true
-          });
-          setNewOwner({ systemName: "", ownerName: "", ownerFeishuUserId: "", consultantNames: "" });
-          await refreshAdmin();
+          setCreatingOwner(true);
+          try {
+            await api.createOwner({
+              systemName: newOwner.systemName,
+              ownerName: newOwner.ownerName,
+              ownerFeishuUserId: newOwner.ownerFeishuUserId || null,
+              consultantNames: newOwner.consultantNames || null,
+              enabled: true
+            });
+            setNewOwner({ systemName: "", ownerName: "", ownerFeishuUserId: "", consultantNames: "" });
+            await refreshAdmin();
+          } finally {
+            setCreatingOwner(false);
+          }
         }}>
           <input value={newOwner.systemName} onChange={(event) => setNewOwner((current) => ({ ...current, systemName: event.target.value }))} placeholder="系统名称" required />
           <input value={newOwner.ownerName} onChange={(event) => setNewOwner((current) => ({ ...current, ownerName: event.target.value }))} placeholder="管理员" required />
-          <input value={newOwner.ownerFeishuUserId} onChange={(event) => setNewOwner((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} placeholder="user_id" />
+          <input value={newOwner.ownerFeishuUserId} onChange={(event) => setNewOwner((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} placeholder="user_id，手动填写" />
           <input value={newOwner.consultantNames} onChange={(event) => setNewOwner((current) => ({ ...current, consultantNames: event.target.value }))} placeholder="顾问" />
-          <button type="submit">新增</button>
+          <button type="submit" disabled={creatingOwner}>{creatingOwner ? "新增中..." : "新增"}</button>
         </form>
         <div className="admin-list">
           {owners.map((owner) => <OwnerRow key={owner.id} owner={owner} onSave={async (values) => {
@@ -1078,10 +1312,55 @@ function AdminPanel() {
   );
 }
 
+function AdminMemberRow({ member, onSave }: {
+  member: any;
+  onSave: (values: Record<string, unknown>) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [values, setValues] = useState({
+    name: member.name ?? "",
+    feishuUserId: member.feishuUserId ?? "",
+    employeeNo: member.employeeNo ?? "",
+    note: member.note ?? "",
+    enabled: member.enabled ?? true
+  });
+
+  useEffect(() => {
+    setValues({
+      name: member.name ?? "",
+      feishuUserId: member.feishuUserId ?? "",
+      employeeNo: member.employeeNo ?? "",
+      note: member.note ?? "",
+      enabled: member.enabled ?? true
+    });
+  }, [member]);
+
+  return (
+    <form className="owner-row admin-member-row" onSubmit={async (event) => {
+      event.preventDefault();
+      setSaving(true);
+      try {
+        await onSave(values);
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <ShieldCheck size={16} />
+      <label><span>姓名</span><input value={values.name} onChange={(event) => setValues((current) => ({ ...current, name: event.target.value }))} aria-label={`${member.name}姓名`} /></label>
+      <label><span>user_id</span><input value={values.feishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, feishuUserId: event.target.value }))} aria-label={`${member.name}user_id`} placeholder="手动填写" /></label>
+      <label><span>工号</span><input value={values.employeeNo ?? ""} onChange={(event) => setValues((current) => ({ ...current, employeeNo: event.target.value }))} aria-label={`${member.name}工号`} placeholder="可选" /></label>
+      <label><span>备注</span><input value={values.note ?? ""} onChange={(event) => setValues((current) => ({ ...current, note: event.target.value }))} aria-label={`${member.name}备注`} placeholder="所属小组" /></label>
+      <label className="owner-enabled"><input type="checkbox" checked={values.enabled} onChange={(event) => setValues((current) => ({ ...current, enabled: event.target.checked }))} />启用</label>
+      <button type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
+    </form>
+  );
+}
+
 function OwnerRow({ owner, onSave }: {
   owner: any;
   onSave: (values: Record<string, unknown>) => Promise<void>;
 }) {
+  const [saving, setSaving] = useState(false);
   const [values, setValues] = useState({
     ownerName: owner.ownerName ?? "",
     ownerFeishuUserId: owner.ownerFeishuUserId ?? "",
@@ -1101,15 +1380,20 @@ function OwnerRow({ owner, onSave }: {
   return (
     <form className="owner-row" onSubmit={async (event) => {
       event.preventDefault();
-      await onSave(values);
+      setSaving(true);
+      try {
+        await onSave(values);
+      } finally {
+        setSaving(false);
+      }
     }}>
       <ShieldCheck size={16} />
       <div className="owner-system-name"><span>系统</span><strong>{owner.systemName}</strong></div>
       <label><span>管理员</span><input value={values.ownerName} onChange={(event) => setValues((current) => ({ ...current, ownerName: event.target.value }))} aria-label={`${owner.systemName}管理员`} /></label>
-      <label><span>user_id</span><input value={values.ownerFeishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} aria-label={`${owner.systemName}user_id`} placeholder="user_id" /></label>
+      <label><span>user_id</span><input value={values.ownerFeishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} aria-label={`${owner.systemName}user_id`} placeholder="手动填写" /></label>
       <label><span>顾问</span><input value={values.consultantNames ?? ""} onChange={(event) => setValues((current) => ({ ...current, consultantNames: event.target.value }))} aria-label={`${owner.systemName}顾问`} placeholder="顾问" /></label>
       <label className="owner-enabled"><input type="checkbox" checked={values.enabled} onChange={(event) => setValues((current) => ({ ...current, enabled: event.target.checked }))} />启用</label>
-      <button type="submit">保存</button>
+      <button type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
     </form>
   );
 }
