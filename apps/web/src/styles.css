@@ -24,6 +24,7 @@
   --info: #315f8f;
   --shadow: 0 22px 54px rgba(31, 26, 23, 0.11);
   --tight-shadow: 0 10px 28px rgba(31, 26, 23, 0.08);
+  --glow-red: 0 0 0 1px rgba(238, 46, 36, 0.15), 0 18px 40px rgba(238, 46, 36, 0.14);
 }
 
 * {
@@ -68,6 +69,53 @@ button svg[class*="lucide-loader-circle"],
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes page-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes red-scan {
+  0% {
+    transform: translateX(-120%);
+    opacity: 0;
+  }
+  20%,
+  70% {
+    opacity: 0.72;
+  }
+  100% {
+    transform: translateX(120%);
+    opacity: 0;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(238, 46, 36, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(238, 46, 36, 0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -151,18 +199,33 @@ button svg[class*="lucide-loader-circle"],
   background: transparent;
   color: var(--dcec-black-60);
   font-weight: 700;
+  transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .nav:hover {
   border-color: var(--line);
   background: #fff;
   color: var(--dcec-black);
+  transform: translateX(3px);
+  box-shadow: 0 12px 24px rgba(31, 26, 23, 0.08);
 }
 
 .nav.active {
   background: var(--dcec-black);
   color: #fff;
   box-shadow: inset 5px 0 0 var(--dcec-red);
+}
+
+.nav:active,
+.command:active,
+.sync-button:active,
+.sync-records-button:active,
+.auth-badge button:active,
+.record-tools button:active,
+.admin-create-form button:active,
+.owner-row button:active,
+.owner-create-form button:active {
+  transform: translateY(1px) scale(0.99);
 }
 
 .rail-card {
@@ -185,6 +248,7 @@ button svg[class*="lucide-loader-circle"],
 .workspace {
   padding: 28px;
   min-width: 0;
+  animation: page-rise 0.42s ease both;
 }
 
 .topbar {
@@ -291,6 +355,7 @@ h3 {
   padding: 0 10px;
   white-space: nowrap;
   font-weight: 800;
+  transition: background 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 .auth-badge button:hover,
@@ -361,6 +426,7 @@ h3 {
   box-shadow: var(--tight-shadow);
   position: relative;
   overflow: hidden;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
 
 .metric::before {
@@ -371,6 +437,27 @@ h3 {
   bottom: 0;
   width: 5px;
   background: var(--dcec-red);
+}
+
+.metric::after,
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(110deg, transparent 0%, transparent 42%, rgba(238, 46, 36, 0.12) 50%, transparent 58%, transparent 100%);
+  transform: translateX(-120%);
+}
+
+.metric:hover {
+  border-color: #f0b5b1;
+  box-shadow: var(--glow-red);
+  transform: translateY(-2px);
+}
+
+.metric:hover::after,
+.panel:hover::after {
+  animation: red-scan 1.25s ease;
 }
 
 .metric svg {
@@ -420,6 +507,14 @@ h3 {
   background: rgba(255, 255, 255, 0.96);
   box-shadow: var(--shadow);
   padding: 22px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.panel:hover {
+  border-color: #d6d6d6;
+  box-shadow: 0 28px 64px rgba(31, 26, 23, 0.14);
 }
 
 .primary-panel {
@@ -457,12 +552,17 @@ h3 {
   color: var(--muted);
   white-space: nowrap;
   font-weight: 800;
+  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 .segmented button.selected {
   background: var(--dcec-black);
   color: #fff;
   box-shadow: inset 0 -3px 0 var(--dcec-red);
+}
+
+.segmented button:hover {
+  transform: translateY(-1px);
 }
 
 .panel-title p {
@@ -514,6 +614,7 @@ h3 {
 .owner-row button:hover,
 .owner-create-form button:hover {
   background: #c91f17;
+  box-shadow: 0 14px 28px rgba(238, 46, 36, 0.2);
 }
 
 .sync-button:disabled,
@@ -587,6 +688,7 @@ h3 {
   padding: 10px 12px;
   color: var(--dcec-black);
   outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
 
 .field textarea {
@@ -607,6 +709,7 @@ h3 {
 .owner-create-form input:focus {
   border-color: var(--dcec-red);
   box-shadow: 0 0 0 3px rgba(238, 46, 36, 0.15);
+  background: #fffdfd;
 }
 
 .attachment-control {
@@ -649,6 +752,13 @@ h3 {
   gap: 7px;
   padding: 7px 8px;
   font-size: 12px;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.attachment-chip:hover {
+  border-color: #efbbb7;
+  box-shadow: 0 8px 18px rgba(238, 46, 36, 0.1);
+  transform: translateY(-1px);
 }
 
 .attachment-chip svg {
@@ -722,6 +832,7 @@ h3 {
   justify-content: center;
   gap: 9px;
   font-weight: 900;
+  box-shadow: inset 0 -3px 0 rgba(238, 46, 36, 0.55);
 }
 
 .login-panel {
@@ -804,6 +915,7 @@ h3 {
   gap: 8px 10px;
   text-align: left;
   border-left: 4px solid transparent;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
 .record-row:hover,
@@ -813,6 +925,11 @@ h3 {
 
 .record-row.active {
   border-left-color: var(--dcec-red);
+  box-shadow: inset 0 0 0 1px rgba(238, 46, 36, 0.08);
+}
+
+.record-row:hover {
+  transform: translateX(3px);
 }
 
 .record-row[data-priority="紧急"] {
@@ -950,6 +1067,7 @@ h3 {
   border-radius: 50%;
   background: var(--info);
   margin-top: 5px;
+  animation: pulse-dot 2.2s ease infinite;
 }
 
 .status-dot[data-status*="延期"],
@@ -1002,6 +1120,13 @@ h3 {
   border-radius: 8px;
   padding: 12px;
   min-height: 72px;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.value-grid div:hover {
+  transform: translateY(-1px);
+  border-color: #efbbb7;
+  background: #fff9f8;
 }
 
 .value-grid span {
@@ -1054,6 +1179,7 @@ h3 {
   border-radius: 50%;
   background: var(--dcec-red);
   box-shadow: 0 0 0 5px rgba(238, 46, 36, 0.13);
+  animation: pulse-dot 2.4s ease infinite;
 }
 
 .timeline-list.compact {
@@ -1239,6 +1365,7 @@ h3 {
   background: var(--paper);
   box-shadow: 0 30px 90px rgba(31, 26, 23, 0.3);
   padding: 22px;
+  animation: toast-in 0.2s ease both;
 }
 
 .modal-head {
@@ -1318,10 +1445,13 @@ h3 {
   border-radius: 8px;
   background: #fafafa;
   padding: 10px 12px;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
 .record-admin-row:hover {
   background: #fff5f4;
+  border-color: #efbbb7;
+  transform: translateX(2px);
 }
 
 .record-admin-row strong,
@@ -1436,6 +1566,13 @@ h3 {
   background: #fafafa;
   border-radius: 8px;
   padding: 10px;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.field-config-row:hover {
+  border-color: #efbbb7;
+  background: #fff9f8;
+  transform: translateX(2px);
 }
 
 .field-config-row.dragging {
@@ -1484,6 +1621,14 @@ h3 {
   border-radius: 8px;
   padding: 10px;
   background: #fafafa;
+  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.admin-list > div:hover,
+.owner-row:hover {
+  background: #fff9f8;
+  border-color: #efbbb7;
+  box-shadow: 0 10px 24px rgba(238, 46, 36, 0.08);
 }
 
 .owner-row {
@@ -1582,6 +1727,7 @@ h3 {
   box-shadow: var(--shadow);
   max-width: min(420px, calc(100vw - 32px));
   text-align: left;
+  animation: toast-in 0.22s ease both;
 }
 
 .busy-overlay {
@@ -1607,6 +1753,7 @@ h3 {
   column-gap: 12px;
   row-gap: 4px;
   align-items: center;
+  animation: toast-in 0.18s ease both;
 }
 
 .busy-card svg {
@@ -1621,6 +1768,17 @@ h3 {
 .busy-card span {
   color: var(--muted);
   font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 @media (max-width: 1380px) {
