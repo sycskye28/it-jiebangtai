@@ -24,7 +24,6 @@
   --info: #315f8f;
   --shadow: 0 22px 54px rgba(31, 26, 23, 0.11);
   --tight-shadow: 0 10px 28px rgba(31, 26, 23, 0.08);
-  --glow-red: 0 0 0 1px rgba(238, 46, 36, 0.15), 0 18px 40px rgba(238, 46, 36, 0.14);
 }
 
 * {
@@ -83,18 +82,27 @@ button svg[class*="lucide-loader-circle"],
   }
 }
 
-@keyframes red-scan {
-  0% {
-    transform: translateX(-120%);
-    opacity: 0;
+@keyframes grid-drift {
+  from {
+    background-position: 0 0, 0 0, 0 0;
   }
-  20%,
-  70% {
+  to {
+    background-position: 32px 0, 0 32px, 0 0;
+  }
+}
+
+@keyframes soft-red-breathe {
+  0% {
     opacity: 0.72;
+    filter: saturate(0.95);
+  }
+  50% {
+    opacity: 1;
+    filter: saturate(1.12);
   }
   100% {
-    transform: translateX(120%);
-    opacity: 0;
+    opacity: 0.72;
+    filter: saturate(0.95);
   }
 }
 
@@ -119,6 +127,16 @@ button svg[class*="lucide-loader-circle"],
   }
 }
 
+@keyframes calm-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -128,6 +146,7 @@ button svg[class*="lucide-loader-circle"],
     linear-gradient(180deg, rgba(31, 26, 23, 0.035) 1px, transparent 1px),
     linear-gradient(135deg, #f7f7f7 0%, #eeeeee 100%);
   background-size: 32px 32px, 32px 32px, auto;
+  animation: grid-drift 28s linear infinite;
 }
 
 .rail {
@@ -155,12 +174,13 @@ button svg[class*="lucide-loader-circle"],
 .brand-mark {
   width: 54px;
   height: 42px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: #fff;
+  background: transparent;
   display: grid;
   place-items: center;
-  box-shadow: var(--tight-shadow);
+  box-shadow: none;
+  animation: calm-float 7s ease-in-out infinite;
 }
 
 .brand-mark img {
@@ -437,27 +457,13 @@ h3 {
   bottom: 0;
   width: 5px;
   background: var(--dcec-red);
-}
-
-.metric::after,
-.panel::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(110deg, transparent 0%, transparent 42%, rgba(238, 46, 36, 0.12) 50%, transparent 58%, transparent 100%);
-  transform: translateX(-120%);
+  animation: soft-red-breathe 4.8s ease-in-out infinite;
 }
 
 .metric:hover {
   border-color: #f0b5b1;
-  box-shadow: var(--glow-red);
+  box-shadow: 0 18px 42px rgba(31, 26, 23, 0.12);
   transform: translateY(-2px);
-}
-
-.metric:hover::after,
-.panel:hover::after {
-  animation: red-scan 1.25s ease;
 }
 
 .metric svg {
@@ -529,6 +535,7 @@ h3 {
   height: 5px;
   border-radius: 8px 8px 0 0;
   background: var(--dcec-red);
+  animation: soft-red-breathe 5.4s ease-in-out infinite;
 }
 
 .segmented {
@@ -840,6 +847,7 @@ h3 {
   justify-items: start;
   gap: 10px;
   max-width: 520px;
+  animation: calm-float 8s ease-in-out infinite;
 }
 
 .login-logo {

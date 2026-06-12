@@ -134,7 +134,7 @@ function App() {
     <main className="shell">
       <aside className="rail">
         <div className="brand">
-          <div className="brand-mark"><img src="/dcec-logo.png" alt="DCEC" /></div>
+          <div className="brand-mark"><img src="/dcec-logo-transparent.png" alt="DCEC" /></div>
           <div>
             <strong>东风康明斯 IT 揭榜台</strong>
             <span>需求与问题管理</span>
@@ -351,7 +351,7 @@ function LoginRequiredPanel({ onToast }: { onToast: (message: string) => void })
 
   return (
     <section className="panel login-panel">
-      <img className="login-logo" src="/dcec-logo.png" alt="DCEC" />
+      <img className="login-logo" src="/dcec-logo-transparent.png" alt="DCEC" />
       <ShieldCheck size={28} />
       <h2>需要飞书登录</h2>
       <p>在飞书客户端内会使用当前网页应用地址登录；在浏览器中会跳转到飞书网页登录。</p>
