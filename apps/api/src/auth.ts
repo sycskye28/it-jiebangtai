@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { feishuService } from "./feishu.js";
-import { ensureDevUser, upsertFeishuLoginUser } from "./repositories.js";
+import { ensureDevUser, storeFeishuUserAccessToken, upsertFeishuLoginUser } from "./repositories.js";
 
 export async function registerAuth(app: FastifyInstance) {
   app.addHook("preHandler", async (request) => {
@@ -35,6 +35,7 @@ export async function registerAuth(app: FastifyInstance) {
     if (body.code) {
       const login = await feishuService.exchangeLoginCode(body.code);
       const user = await upsertFeishuLoginUser(login.userInfo);
+      await storeFeishuUserAccessToken(user.feishuUserId, login.accessToken, login.expiresIn);
       return {
         user,
         feishu: {

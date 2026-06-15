@@ -32,8 +32,22 @@ function isSuperAdminIdentity(feishuUserId: string, employeeNo?: string | null, 
   return normalizedId === "a10986" || normalizedEmployeeNo === "a10986" || name === "沈昀初";
 }
 
-function isInfoDigitalDepartment(department?: string | null) {
-  return String(department ?? "").trim() === "信息数字化部";
+async function isAdminMemberIdentity(feishuUserId: string, employeeNo?: string | null, name?: string | null) {
+  const ids = [feishuUserId, employeeNo].map((item) => String(item ?? "").trim().toLowerCase()).filter(Boolean);
+  const normalizedName = String(name ?? "").trim();
+  const result = await query(
+    `SELECT id
+       FROM admin_members
+      WHERE enabled = true
+        AND (
+          lower(COALESCE(feishu_user_id, '')) = ANY($1::text[])
+          OR lower(COALESCE(employee_no, '')) = ANY($1::text[])
+          OR name = $2
+        )
+      LIMIT 1`,
+    [ids, normalizedName]
+  );
+  return Boolean(result.rows[0]);
 }
 
 export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
@@ -52,7 +66,7 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   const avatarUrl = userInfo.avatar_url ? String(userInfo.avatar_url) : null;
   const role: AuthUser["role"] = isSuperAdminIdentity(userId || openId, employeeNo, name)
     ? "admin"
-    : isInfoDigitalDepartment(department)
+    : await isAdminMemberIdentity(userId || openId, employeeNo, name)
       ? "system_owner"
       : "business";
 
@@ -79,6 +93,31 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   return toAuthUser(result.rows[0]);
 }
 
+export async function storeFeishuUserAccessToken(feishuUserId: string, accessToken: string, expiresInSeconds: number) {
+  const expiresAt = new Date(Date.now() + Math.max(60, expiresInSeconds - 120) * 1000);
+  await query(
+    `UPDATE users
+        SET feishu_user_access_token = $2,
+            feishu_user_token_expires_at = $3,
+            updated_at = now()
+      WHERE feishu_user_id = $1`,
+    [feishuUserId, accessToken, expiresAt]
+  );
+}
+
+export async function getValidFeishuUserAccessToken(userId: string) {
+  const result = await query<{ feishu_user_access_token: string }>(
+    `SELECT feishu_user_access_token
+       FROM users
+      WHERE id = $1
+        AND feishu_user_access_token IS NOT NULL
+        AND feishu_user_token_expires_at > now()
+      LIMIT 1`,
+    [userId]
+  );
+  return result.rows[0]?.feishu_user_access_token ?? null;
+}
+
 function decodeHeaderValue(value: string) {
   try {
     return decodeURIComponent(value);
@@ -88,16 +127,18 @@ function decodeHeaderValue(value: string) {
 }
 
 export async function ensureDevUser(headers: Record<string, string | string[] | undefined>) {
-  const feishuUserId = String(headers["x-dev-user-id"] ?? "dev-admin");
-  const name = decodeHeaderValue(String(headers["x-dev-user-name"] ?? "%E5%BD%AD%E6%B6%9B"));
-  const department = decodeHeaderValue(String(headers["x-dev-department"] ?? "IT"));
+  const feishuUserId = String(headers["x-dev-user-id"] ?? "anonymous");
+  const name = decodeHeaderValue(String(headers["x-dev-user-name"] ?? "%E6%9C%AA%E7%99%BB%E5%BD%95%E7%94%A8%E6%88%B7"));
+  const department = decodeHeaderValue(String(headers["x-dev-department"] ?? ""));
   const requestedRole = String(headers["x-dev-role"] ?? "");
   const isSimulation = requestedRole === "business" || requestedRole === "system_owner";
   const role: AuthUser["role"] = !isSimulation && isSuperAdminIdentity(feishuUserId, feishuUserId, name)
     ? "admin"
     : requestedRole === "external"
       ? "external"
-      : isInfoDigitalDepartment(department)
+      : isSimulation
+        ? requestedRole
+      : await isAdminMemberIdentity(feishuUserId, feishuUserId, name)
         ? "system_owner"
         : "business";
 

@@ -173,6 +173,35 @@ function todayInChina() {
   }).format(new Date());
 }
 
+function dateTimeInChina(value: string | Date | number = new Date()) {
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).formatToParts(new Date(value));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}:${part("second")}`;
+}
+
+function submissionTimelineBody(input: {
+  submitterName: string;
+  submittedAt: string | Date | number;
+  ownerName?: string | null;
+  extra?: string | null;
+}) {
+  return [
+    `提交人：${input.submitterName}`,
+    `提交时间：${dateTimeInChina(input.submittedAt)}`,
+    input.ownerName ? `自动分派给：${input.ownerName}` : null,
+    input.extra || null
+  ].filter(Boolean).join("\n");
+}
+
 function applySubmissionAutoFields(
   values: Record<string, unknown>,
   fields: Array<{ fieldKey: string; label: string }>,
@@ -463,6 +492,21 @@ async function trySendNotification(recordId: string | null, payload: Parameters<
   }
 }
 
+function normalizeManualFeishuUserId(providedUserId?: string | null) {
+  return String(providedUserId ?? "").trim() || null;
+}
+
+function toAdminMember(row: any) {
+  return {
+    id: row.id,
+    name: row.name,
+    feishuUserId: row.feishu_user_id,
+    employeeNo: row.employee_no,
+    note: row.note,
+    enabled: row.enabled
+  };
+}
+
 export async function registerRoutes(app: FastifyInstance) {
   app.get("/health", async () => ({ ok: true }));
 
@@ -549,6 +593,301 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/system-owners", async () => listSystemOwners());
+
+  app.get("/api/admin/admin-members", async (request) => {
+    adminOnly(request.user.role);
+    const result = await query<any>(
+      `SELECT id, name, feishu_user_id, employee_no, note, enabled
+         FROM admin_members
+        ORDER BY enabled DESC, name`
+    );
+    return result.rows.map(toAdminMember);
+  });
+
+  app.get("/api/admin/config/export", async (request, reply) => {
+    adminOnly(request.user.role);
+    const [formTypes, fieldConfigs, systemOwners, adminMembers, notificationRules] = await Promise.all([
+      query<any>("SELECT * FROM form_types ORDER BY sort_order, name"),
+      query<any>("SELECT * FROM field_configs ORDER BY form_type_key, sort_order, label"),
+      query<any>("SELECT * FROM system_owners ORDER BY system_name"),
+      query<any>("SELECT * FROM admin_members ORDER BY enabled DESC, name"),
+      query<any>("SELECT * FROM notification_rules ORDER BY event_key")
+    ]);
+    const exportedAt = new Date().toISOString();
+    const payload = {
+      version: 1,
+      exportedAt,
+      formTypes: formTypes.rows,
+      fieldConfigs: fieldConfigs.rows,
+      systemOwners: systemOwners.rows,
+      adminMembers: adminMembers.rows,
+      notificationRules: notificationRules.rows
+    };
+    reply
+      .header("content-type", "application/json; charset=utf-8")
+      .header("content-disposition", `attachment; filename="it-jiebangtai-config-${exportedAt.slice(0, 10)}.json"`);
+    return payload;
+  });
+
+  app.post("/api/admin/config/import", async (request) => {
+    adminOnly(request.user.role);
+    const body = z.object({
+      backup: z.object({
+        formTypes: z.array(z.record(z.unknown())).default([]),
+        fieldConfigs: z.array(z.record(z.unknown())).default([]),
+        systemOwners: z.array(z.record(z.unknown())).default([]),
+        adminMembers: z.array(z.record(z.unknown())).default([]),
+        notificationRules: z.array(z.record(z.unknown())).default([])
+      }).passthrough()
+    }).parse(request.body);
+    const summary = { formTypes: 0, fieldConfigs: 0, systemOwners: 0, adminMembers: 0, notificationRules: 0 };
+
+    await withTransaction(async (client) => {
+      for (const row of body.backup.formTypes) {
+        const key = String(row.key ?? "").trim();
+        if (!key) continue;
+        await client.query(
+          `INSERT INTO form_types (key, name, description, title_field_key, system_field_key, submitter_field_key, status_field_key, sort_order, enabled, feishu_table_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (key) DO UPDATE SET
+             name=EXCLUDED.name,
+             description=EXCLUDED.description,
+             title_field_key=EXCLUDED.title_field_key,
+             system_field_key=EXCLUDED.system_field_key,
+             submitter_field_key=EXCLUDED.submitter_field_key,
+             status_field_key=EXCLUDED.status_field_key,
+             sort_order=EXCLUDED.sort_order,
+             enabled=EXCLUDED.enabled,
+             feishu_table_id=EXCLUDED.feishu_table_id,
+             updated_at=now()`,
+          [
+            key,
+            String(row.name ?? key),
+            row.description ?? null,
+            String(row.title_field_key ?? "title"),
+            String(row.system_field_key ?? "system"),
+            String(row.submitter_field_key ?? "submitter"),
+            String(row.status_field_key ?? "status"),
+            Number(row.sort_order ?? 100),
+            row.enabled !== false,
+            row.feishu_table_id ? String(row.feishu_table_id) : null
+          ]
+        );
+        summary.formTypes += 1;
+      }
+
+      for (const row of body.backup.fieldConfigs) {
+        const formTypeKey = String(row.form_type_key ?? "").trim();
+        const fieldKey = String(row.field_key ?? "").trim();
+        if (!formTypeKey || !fieldKey) continue;
+        await client.query(
+          `INSERT INTO field_configs (form_type_key, field_key, label, kind, required, visible_to_business, editable_by_business, business_visible, internal, show_in_list, sort_order, options, feishu_field_name)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           ON CONFLICT (form_type_key, field_key) DO UPDATE SET
+             label=EXCLUDED.label,
+             kind=EXCLUDED.kind,
+             required=EXCLUDED.required,
+             visible_to_business=EXCLUDED.visible_to_business,
+             editable_by_business=EXCLUDED.editable_by_business,
+             business_visible=EXCLUDED.business_visible,
+             internal=EXCLUDED.internal,
+             show_in_list=EXCLUDED.show_in_list,
+             sort_order=EXCLUDED.sort_order,
+             options=EXCLUDED.options,
+             feishu_field_name=EXCLUDED.feishu_field_name,
+             updated_at=now()`,
+          [
+            formTypeKey,
+            fieldKey,
+            String(row.label ?? fieldKey),
+            String(row.kind ?? "text"),
+            row.required === true,
+            row.visible_to_business !== false,
+            row.editable_by_business !== false,
+            row.business_visible !== false,
+            row.internal === true,
+            row.show_in_list === true,
+            Number(row.sort_order ?? 100),
+            JSON.stringify(row.options ?? []),
+            row.feishu_field_name ? String(row.feishu_field_name) : String(row.label ?? fieldKey)
+          ]
+        );
+        summary.fieldConfigs += 1;
+      }
+
+      for (const row of body.backup.systemOwners) {
+        const systemName = String(row.system_name ?? "").trim();
+        if (!systemName) continue;
+        await client.query(
+          `INSERT INTO system_owners (system_name, owner_name, owner_feishu_user_id, consultant_names, enabled)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (system_name) DO UPDATE SET
+             owner_name=EXCLUDED.owner_name,
+             owner_feishu_user_id=EXCLUDED.owner_feishu_user_id,
+             consultant_names=EXCLUDED.consultant_names,
+             enabled=EXCLUDED.enabled,
+             updated_at=now()`,
+          [
+            systemName,
+            String(row.owner_name ?? ""),
+            row.owner_feishu_user_id ? String(row.owner_feishu_user_id) : null,
+            row.consultant_names ? String(row.consultant_names) : null,
+            row.enabled !== false
+          ]
+        );
+        summary.systemOwners += 1;
+      }
+
+      for (const row of body.backup.adminMembers) {
+        const name = String(row.name ?? "").trim();
+        const feishuUserId = row.feishu_user_id ? String(row.feishu_user_id) : null;
+        if (!name) continue;
+        const existing = feishuUserId
+          ? await client.query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
+          : await client.query<any>("SELECT id FROM admin_members WHERE name=$1 AND feishu_user_id IS NULL LIMIT 1", [name]);
+        if (existing.rows[0]) {
+          await client.query(
+            `UPDATE admin_members
+                SET name=$2,
+                    feishu_user_id=$3,
+                    employee_no=$4,
+                    note=$5,
+                    enabled=$6,
+                    updated_at=now()
+              WHERE id=$1`,
+            [
+              existing.rows[0].id,
+              name,
+              feishuUserId,
+              row.employee_no ? String(row.employee_no) : feishuUserId,
+              row.note ? String(row.note) : null,
+              row.enabled !== false
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [
+              name,
+              feishuUserId,
+              row.employee_no ? String(row.employee_no) : feishuUserId,
+              row.note ? String(row.note) : null,
+              row.enabled !== false
+            ]
+          );
+        }
+        summary.adminMembers += 1;
+      }
+
+      for (const row of body.backup.notificationRules) {
+        const eventKey = String(row.event_key ?? "").trim();
+        if (!eventKey) continue;
+        await client.query(
+          `INSERT INTO notification_rules (event_key, name, template, enabled)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (event_key) DO UPDATE SET
+             name=EXCLUDED.name,
+             template=EXCLUDED.template,
+             enabled=EXCLUDED.enabled,
+             updated_at=now()`,
+          [
+            eventKey,
+            String(row.name ?? eventKey),
+            String(row.template ?? ""),
+            row.enabled !== false
+          ]
+        );
+        summary.notificationRules += 1;
+      }
+
+      await client.query(
+        `INSERT INTO audit_logs (entity_type, action, new_value, actor_user_id, actor_name)
+         VALUES ('config_backup', 'import', $1, $2, $3)`,
+        [JSON.stringify(summary), request.user.id, request.user.name]
+      );
+    });
+
+    return summary;
+  });
+
+  app.post("/api/admin/admin-members", async (request) => {
+    adminOnly(request.user.role);
+    const body = z.object({
+      name: z.string().min(1),
+      feishuUserId: z.string().nullable().optional(),
+      employeeNo: z.string().nullable().optional(),
+      note: z.string().nullable().optional(),
+      enabled: z.boolean().default(true)
+    }).parse(request.body);
+    const feishuUserId = normalizeManualFeishuUserId(body.feishuUserId);
+    const employeeNo = body.employeeNo?.trim() || feishuUserId || null;
+    const existing = feishuUserId
+      ? await query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
+      : { rows: [] };
+    const result = existing.rows[0]
+      ? await query<any>(
+        `UPDATE admin_members
+            SET name=$2,
+                employee_no=$3,
+                note=$4,
+                enabled=$5,
+                updated_at=now()
+          WHERE id=$1
+          RETURNING *`,
+        [existing.rows[0].id, body.name, employeeNo, body.note ?? null, body.enabled]
+      )
+      : await query<any>(
+        `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
+         VALUES ($1,$2,$3,$4,$5)
+         RETURNING *`,
+        [body.name, feishuUserId, employeeNo, body.note ?? null, body.enabled]
+      );
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
+       VALUES ('admin_member', $1, 'upsert', $2, $3, $4)`,
+      [result.rows[0].id, JSON.stringify(result.rows[0]), request.user.id, request.user.name]
+    );
+    return toAdminMember(result.rows[0]);
+  });
+
+  app.patch("/api/admin/admin-members/:id", async (request) => {
+    adminOnly(request.user.role);
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      name: z.string().min(1).optional(),
+      feishuUserId: z.string().nullable().optional(),
+      employeeNo: z.string().nullable().optional(),
+      note: z.string().nullable().optional(),
+      enabled: z.boolean().optional()
+    }).parse(request.body);
+    const current = await query<any>("SELECT * FROM admin_members WHERE id=$1", [params.id]);
+    if (!current.rows[0]) return app.httpErrors.notFound("Admin member not found.");
+    const next = { ...current.rows[0] };
+    if (body.name !== undefined) next.name = body.name;
+    if (body.feishuUserId !== undefined) next.feishu_user_id = normalizeManualFeishuUserId(body.feishuUserId);
+    if (body.employeeNo !== undefined) next.employee_no = body.employeeNo?.trim() || next.feishu_user_id || null;
+    if (body.note !== undefined) next.note = body.note;
+    if (body.enabled !== undefined) next.enabled = body.enabled;
+    const result = await query<any>(
+      `UPDATE admin_members
+          SET name=$2,
+              feishu_user_id=$3,
+              employee_no=$4,
+              note=$5,
+              enabled=$6,
+              updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+      [params.id, next.name, next.feishu_user_id, next.employee_no, next.note, next.enabled]
+    );
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, new_value, actor_user_id, actor_name)
+       VALUES ('admin_member', $1, 'update', $2, $3, $4, $5)`,
+      [params.id, JSON.stringify(current.rows[0]), JSON.stringify(result.rows[0]), request.user.id, request.user.name]
+    );
+    return toAdminMember(result.rows[0]);
+  });
 
   app.post("/api/admin/form-types", async (request) => {
     adminOnly(request.user.role);
@@ -763,6 +1102,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const summary = {
       syncedTypes: [] as string[],
       importedRecords: 0,
+      updatedRecords: 0,
       removedLocalRecords: 0
     };
 
@@ -785,13 +1125,21 @@ export async function registerRoutes(app: FastifyInstance) {
           [formType.key]
         );
         const fields = fieldsResult.rows;
-        const deleted = await client.query("DELETE FROM records WHERE type_key=$1", [formType.key]);
+        const remoteRecords = await feishuService.listAllBitableRecords(table.table_id);
+        const remoteRecordIds = new Set(remoteRecords.map((remoteRecord) => String((remoteRecord as any).record_id ?? "")).filter(Boolean));
+        const deleted = await client.query(
+          `DELETE FROM records
+            WHERE type_key=$1
+              AND feishu_record_id IS NOT NULL
+              AND NOT (feishu_record_id = ANY($2::text[]))`,
+          [formType.key, [...remoteRecordIds]]
+        );
         summary.removedLocalRecords += deleted.rowCount ?? 0;
 
-        const remoteRecords = await feishuService.listAllBitableRecords(table.table_id);
         for (const remoteRecord of remoteRecords) {
           const remoteFields = ((remoteRecord as any).fields ?? {}) as Record<string, unknown>;
           const recordId = String((remoteRecord as any).record_id ?? "");
+          if (!recordId) continue;
           const values: Record<string, unknown> = {};
           for (const field of fields) {
             const remoteName = field.feishu_field_name || field.label;
@@ -810,10 +1158,51 @@ export async function registerRoutes(app: FastifyInstance) {
           values[formType.status_field_key] = status;
           values.system_owner = owner.ownerName;
 
-          await client.query(
+          const existing = await client.query<any>(
+            "SELECT * FROM records WHERE type_key=$1 AND feishu_record_id=$2 LIMIT 1",
+            [formType.key, recordId]
+          );
+          const existingRecord = existing.rows[0];
+          if (existingRecord) {
+            const mergedValues = {
+              ...(existingRecord.values ?? {}),
+              ...values
+            };
+            const result = await client.query(
+              `UPDATE records
+                  SET record_no=COALESCE(record_no, $2),
+                      title=$3,
+                      system_name=$4,
+                      status=$5,
+                      priority=$6,
+                      submitter_name=COALESCE(NULLIF(submitter_name, '飞书同步'), $7),
+                      owner_name=$8,
+                      owner_feishu_user_id=COALESCE(owner_feishu_user_id, $9),
+                      values=$10,
+                      updated_at=now()
+                WHERE id=$1`,
+              [
+                existingRecord.id,
+                recordNo,
+                title,
+                systemName,
+                status,
+                bitableValueToString(values.priority ?? values.demand_priority ?? values.issue_priority) || null,
+                submitterName,
+                owner.ownerName,
+                owner.ownerFeishuUserId,
+                JSON.stringify(mergedValues)
+              ]
+            );
+            summary.updatedRecords += result.rowCount ?? 0;
+            continue;
+          }
+
+          const inserted = await client.query<any>(
             `INSERT INTO records (record_no, type_key, title, system_name, status, priority, submitter_user_id,
                                   submitter_name, owner_name, owner_feishu_user_id, values, feishu_record_id)
-             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10,$11)`,
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10,$11)
+             RETURNING id, created_at`,
             [
               recordNo,
               formType.key,
@@ -826,6 +1215,21 @@ export async function registerRoutes(app: FastifyInstance) {
               owner.ownerFeishuUserId,
               JSON.stringify(values),
               recordId || null
+            ]
+          );
+          await client.query(
+            `INSERT INTO timeline_events (record_id, event_type, title, body, actor_name, created_at)
+             VALUES ($1, 'record_created', '记录已提交', $2, $3, $4)`,
+            [
+              inserted.rows[0].id,
+              submissionTimelineBody({
+                submitterName,
+                submittedAt: inserted.rows[0].created_at,
+                ownerName: owner.ownerName,
+                extra: "来源：飞书多维表格同步"
+              }),
+              submitterName,
+              inserted.rows[0].created_at
             ]
           );
           summary.importedRecords += 1;
@@ -855,8 +1259,13 @@ export async function registerRoutes(app: FastifyInstance) {
     const current = await query<any>("SELECT * FROM system_owners WHERE id = $1", [params.id]);
     if (!current.rows[0]) return app.httpErrors.notFound("System owner not found.");
     const next = { ...current.rows[0] };
+    const ownerNameChanged = body.ownerName !== undefined && body.ownerName !== current.rows[0].owner_name;
     if (body.ownerName !== undefined) next.owner_name = body.ownerName;
-    if (body.ownerFeishuUserId !== undefined) next.owner_feishu_user_id = body.ownerFeishuUserId || null;
+    next.owner_feishu_user_id = body.ownerFeishuUserId !== undefined
+      ? normalizeManualFeishuUserId(body.ownerFeishuUserId)
+      : ownerNameChanged
+        ? null
+        : next.owner_feishu_user_id;
     if (body.consultantNames !== undefined) next.consultant_names = body.consultantNames;
     if (body.enabled !== undefined) next.enabled = body.enabled;
     const result = await query<any>(
@@ -887,6 +1296,7 @@ export async function registerRoutes(app: FastifyInstance) {
       consultantNames: z.string().nullable().optional(),
       enabled: z.boolean().default(true)
     }).parse(request.body);
+    const ownerFeishuUserId = normalizeManualFeishuUserId(body.ownerFeishuUserId);
     const result = await query<any>(
       `INSERT INTO system_owners (system_name, owner_name, owner_feishu_user_id, consultant_names, enabled)
        VALUES ($1,$2,$3,$4,$5)
@@ -897,7 +1307,7 @@ export async function registerRoutes(app: FastifyInstance) {
          enabled=EXCLUDED.enabled,
          updated_at=now()
        RETURNING *`,
-      [body.systemName, body.ownerName, body.ownerFeishuUserId ?? null, body.consultantNames ?? null, body.enabled]
+      [body.systemName, body.ownerName, ownerFeishuUserId, body.consultantNames ?? null, body.enabled]
     );
     await query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
@@ -1023,19 +1433,28 @@ export async function registerRoutes(app: FastifyInstance) {
       await client.query(
         `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
          VALUES ($1, 'record_created', '记录已提交', $2, $3, $4)`,
-        [record.id, `自动分派给 ${owner.ownerName}`, request.user.id, request.user.name]
+        [
+          record.id,
+          submissionTimelineBody({
+            submitterName: request.user.name,
+            submittedAt: record.created_at,
+            ownerName: owner.ownerName
+          }),
+          request.user.id,
+          request.user.name
+        ]
       );
       await client.query(
         `INSERT INTO audit_logs (record_id, entity_type, entity_id, action, new_value, actor_user_id, actor_name)
          VALUES ($1, 'record', $5, 'create', $2, $3, $4)`,
         [record.id, JSON.stringify(mergedValues), request.user.id, request.user.name, record.id]
       );
-      return record;
+      return { ...record, form_type_name: formType.name };
     });
 
     await trySendNotification(created.id, {
       eventKey: "record_created",
-      title: `新${created.type_key === "demand" ? "需求" : "问题"}：${created.title}`,
+      title: `新${recordTypeTitle(created.type_key, created.form_type_name)}：${created.title}`,
       body: `系统：${created.system_name}\n负责人：${created.owner_name}`,
       submitterFeishuUserId: request.user.feishuUserId,
       ownerFeishuUserId: created.owner_feishu_user_id
@@ -1276,11 +1695,21 @@ export async function registerRoutes(app: FastifyInstance) {
           ]
         );
         const row = result.rows[0];
-        createdRows.push(row);
+        createdRows.push({ ...row, form_type_name: formType.name });
         await client.query(
           `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
            VALUES ($1, 'record_created', '多系统记录已生成', $2, $3, $4)`,
-          [row.id, `来源记录：${current.record_no ?? current.title}；自动分派给 ${owner.ownerName}`, request.user.id, request.user.name]
+          [
+            row.id,
+            submissionTimelineBody({
+              submitterName: current.submitter_name,
+              submittedAt: row.created_at,
+              ownerName: owner.ownerName,
+              extra: `来源记录：${current.record_no ?? current.title}`
+            }),
+            request.user.id,
+            request.user.name
+          ]
         );
       }
       return createdRows;
@@ -1289,7 +1718,7 @@ export async function registerRoutes(app: FastifyInstance) {
       await tryCreateFeishuRecord(record);
       await trySendNotification(record.id, {
         eventKey: "record_created",
-        title: `新${recordTypeTitle(record.type_key)}：${record.title}`,
+        title: `新${recordTypeTitle(record.type_key, record.form_type_name)}：${record.title}`,
         body: `系统：${record.system_name}\n负责人：${record.owner_name}`,
         submitterFeishuUserId: record.values?.submitter_feishu_user_id ?? null,
         ownerFeishuUserId: record.owner_feishu_user_id

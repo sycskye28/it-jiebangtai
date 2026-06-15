@@ -2,6 +2,13 @@ import type { FieldConfig, FormType, RecordDetail, RecordSummary, CurrentUser } 
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
+if (typeof localStorage !== "undefined" && localStorage.getItem("devUserId") === "dev-admin") {
+  localStorage.removeItem("devUserId");
+  localStorage.removeItem("devUserName");
+  localStorage.removeItem("devRole");
+  localStorage.removeItem("devDepartment");
+}
+
 function headerSafe(value: string) {
   return encodeURIComponent(value);
 }
@@ -27,10 +34,10 @@ async function request<T>(path: string, options: RequestInit = {}) {
     ...options,
     headers: {
       ...(isFormData ? {} : { "content-type": "application/json" }),
-      "x-dev-user-id": localStorage.getItem("devUserId") ?? "dev-admin",
-      "x-dev-user-name": headerSafe(localStorage.getItem("devUserName") ?? "彭涛"),
+      "x-dev-user-id": localStorage.getItem("devUserId") ?? "anonymous",
+      "x-dev-user-name": headerSafe(localStorage.getItem("devUserName") ?? "未登录用户"),
       "x-dev-role": localStorage.getItem("devRole") ?? "business",
-      "x-dev-department": headerSafe(localStorage.getItem("devDepartment") ?? "IT"),
+      "x-dev-department": headerSafe(localStorage.getItem("devDepartment") ?? ""),
       ...(options.headers ?? {})
     }
   });
@@ -43,7 +50,10 @@ async function request<T>(path: string, options: RequestInit = {}) {
 
 export const api = {
   me: () => request<CurrentUser>("/api/auth/me"),
-  feishuOAuthUrl: () => request<{ configured: boolean; redirectUri: string; url: string }>("/api/auth/feishu/oauth-url"),
+  feishuOAuthUrl: (redirectUri?: string) => {
+    const search = redirectUri ? `?redirectUri=${encodeURIComponent(redirectUri)}` : "";
+    return request<{ configured: boolean; redirectUri: string; url: string }>(`/api/auth/feishu/oauth-url${search}`);
+  },
   loginFeishu: (code: string) => request<{ user: CurrentUser }>("/api/auth/feishu/login", {
     method: "POST",
     body: JSON.stringify({ code })
@@ -109,6 +119,20 @@ export const api = {
     method: "PATCH",
     body: JSON.stringify(values)
   }),
+  adminMembers: () => request<any[]>("/api/admin/admin-members"),
+  createAdminMember: (values: Record<string, unknown>) => request<any>("/api/admin/admin-members", {
+    method: "POST",
+    body: JSON.stringify(values)
+  }),
+  updateAdminMember: (id: string, values: Record<string, unknown>) => request<any>(`/api/admin/admin-members/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(values)
+  }),
+  exportConfig: () => request<any>("/api/admin/config/export"),
+  importConfig: (backup: Record<string, unknown>) => request<any>("/api/admin/config/import", {
+    method: "POST",
+    body: JSON.stringify({ backup })
+  }),
   syncBitableSchema: () => request<{
     disabledFormTypes: string[];
     importedFormTypes: string[];
@@ -123,6 +147,7 @@ export const api = {
   syncBitableRecords: () => request<{
     syncedTypes: string[];
     importedRecords: number;
+    updatedRecords: number;
     removedLocalRecords: number;
   }>("/api/admin/feishu/sync-records-from-bitable", {
     method: "POST",
