@@ -12,10 +12,13 @@ import { feishuService } from "./feishu.js";
 import {
   canViewRecord,
   getFieldConfigs,
+  getFeishuUserTokenState,
   getFormType,
   getFormTypes,
+  getValidFeishuUserAccessToken,
   getOwnerForSystem,
   listSystemOwners,
+  storeFeishuUserTokens,
 } from "./repositories.js";
 
 const adminOnly = (role: string) => {
@@ -496,12 +499,19 @@ function normalizeManualFeishuUserId(providedUserId?: string | null) {
   return String(providedUserId ?? "").trim() || null;
 }
 
+function isSuperAdminIdentityValue(feishuUserId?: string | null, employeeNo?: string | null, name?: string | null) {
+  const normalizedUserId = String(feishuUserId ?? "").trim().toLowerCase();
+  const normalizedEmployeeNo = String(employeeNo ?? "").trim().toLowerCase();
+  return normalizedUserId === "a10986" || normalizedEmployeeNo === "a10986" || String(name ?? "").trim() === "沈昀初";
+}
+
 function toAdminMember(row: any) {
   return {
     id: row.id,
     name: row.name,
     feishuUserId: row.feishu_user_id,
     employeeNo: row.employee_no,
+    role: row.role ?? "system_owner",
     note: row.note,
     enabled: row.enabled
   };
@@ -597,11 +607,46 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/api/admin/admin-members", async (request) => {
     adminOnly(request.user.role);
     const result = await query<any>(
-      `SELECT id, name, feishu_user_id, employee_no, note, enabled
+      `SELECT id, name, feishu_user_id, employee_no, role, note, enabled
          FROM admin_members
-        ORDER BY enabled DESC, name`
+        ORDER BY enabled DESC, role DESC, name`
     );
     return result.rows.map(toAdminMember);
+  });
+
+  app.get("/api/admin/feishu/users/search", async (request) => {
+    adminOnly(request.user.role);
+    const queryParams = z.object({
+      query: z.string().trim().min(1),
+      pageSize: z.coerce.number().int().min(1).max(20).default(10),
+      pageToken: z.string().optional()
+    }).parse(request.query);
+    let token = await getValidFeishuUserAccessToken(request.user.id);
+    if (!token) {
+      const tokenState = await getFeishuUserTokenState(request.user.id);
+      const refreshTokenValid = tokenState?.feishu_user_refresh_token
+        && tokenState.feishu_user_refresh_expires_at
+        && tokenState.feishu_user_refresh_expires_at > new Date();
+      if (refreshTokenValid) {
+        const refreshed = await feishuService.refreshUserAccessToken(tokenState.feishu_user_refresh_token!);
+        await storeFeishuUserTokens({
+          feishuUserId: request.user.feishuUserId,
+          accessToken: refreshed.accessToken,
+          expiresInSeconds: refreshed.expiresIn,
+          refreshToken: refreshed.refreshToken,
+          refreshExpiresInSeconds: refreshed.refreshExpiresIn
+        });
+        token = refreshed.accessToken;
+      }
+    }
+    if (!token) {
+      return app.httpErrors.badRequest("missing_user_token");
+    }
+    return feishuService.searchUsers(token, {
+      query: queryParams.query,
+      pageSize: queryParams.pageSize,
+      pageToken: queryParams.pageToken
+    });
   });
 
   app.get("/api/admin/config/export", async (request, reply) => {
@@ -741,6 +786,8 @@ export async function registerRoutes(app: FastifyInstance) {
       for (const row of body.backup.adminMembers) {
         const name = String(row.name ?? "").trim();
         const feishuUserId = row.feishu_user_id ? String(row.feishu_user_id) : null;
+        const employeeNo = row.employee_no ? String(row.employee_no) : feishuUserId;
+        const memberRole = row.role === "admin" || isSuperAdminIdentityValue(feishuUserId, employeeNo, name) ? "admin" : "system_owner";
         if (!name) continue;
         const existing = feishuUserId
           ? await client.query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
@@ -751,27 +798,30 @@ export async function registerRoutes(app: FastifyInstance) {
                 SET name=$2,
                     feishu_user_id=$3,
                     employee_no=$4,
-                    note=$5,
-                    enabled=$6,
+                    role=$5,
+                    note=$6,
+                    enabled=$7,
                     updated_at=now()
               WHERE id=$1`,
             [
               existing.rows[0].id,
               name,
               feishuUserId,
-              row.employee_no ? String(row.employee_no) : feishuUserId,
+              employeeNo,
+              memberRole,
               row.note ? String(row.note) : null,
               row.enabled !== false
             ]
           );
         } else {
           await client.query(
-            `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
-             VALUES ($1,$2,$3,$4,$5)`,
+            `INSERT INTO admin_members (name, feishu_user_id, employee_no, role, note, enabled)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
             [
               name,
               feishuUserId,
-              row.employee_no ? String(row.employee_no) : feishuUserId,
+              employeeNo,
+              memberRole,
               row.note ? String(row.note) : null,
               row.enabled !== false
             ]
@@ -817,11 +867,13 @@ export async function registerRoutes(app: FastifyInstance) {
       name: z.string().min(1),
       feishuUserId: z.string().nullable().optional(),
       employeeNo: z.string().nullable().optional(),
+      role: z.enum(["system_owner", "admin"]).default("system_owner"),
       note: z.string().nullable().optional(),
       enabled: z.boolean().default(true)
     }).parse(request.body);
     const feishuUserId = normalizeManualFeishuUserId(body.feishuUserId);
     const employeeNo = body.employeeNo?.trim() || feishuUserId || null;
+    const memberRole = isSuperAdminIdentityValue(feishuUserId, employeeNo, body.name) ? "admin" : body.role;
     const existing = feishuUserId
       ? await query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
       : { rows: [] };
@@ -830,18 +882,19 @@ export async function registerRoutes(app: FastifyInstance) {
         `UPDATE admin_members
             SET name=$2,
                 employee_no=$3,
-                note=$4,
-                enabled=$5,
+                role=$4,
+                note=$5,
+                enabled=$6,
                 updated_at=now()
           WHERE id=$1
           RETURNING *`,
-        [existing.rows[0].id, body.name, employeeNo, body.note ?? null, body.enabled]
+        [existing.rows[0].id, body.name, employeeNo, memberRole, body.note ?? null, body.enabled]
       )
       : await query<any>(
-        `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
-         VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO admin_members (name, feishu_user_id, employee_no, role, note, enabled)
+         VALUES ($1,$2,$3,$4,$5,$6)
          RETURNING *`,
-        [body.name, feishuUserId, employeeNo, body.note ?? null, body.enabled]
+        [body.name, feishuUserId, employeeNo, memberRole, body.note ?? null, body.enabled]
       );
     await query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
@@ -858,6 +911,7 @@ export async function registerRoutes(app: FastifyInstance) {
       name: z.string().min(1).optional(),
       feishuUserId: z.string().nullable().optional(),
       employeeNo: z.string().nullable().optional(),
+      role: z.enum(["system_owner", "admin"]).optional(),
       note: z.string().nullable().optional(),
       enabled: z.boolean().optional()
     }).parse(request.body);
@@ -867,6 +921,8 @@ export async function registerRoutes(app: FastifyInstance) {
     if (body.name !== undefined) next.name = body.name;
     if (body.feishuUserId !== undefined) next.feishu_user_id = normalizeManualFeishuUserId(body.feishuUserId);
     if (body.employeeNo !== undefined) next.employee_no = body.employeeNo?.trim() || next.feishu_user_id || null;
+    if (body.role !== undefined) next.role = body.role;
+    if (isSuperAdminIdentityValue(next.feishu_user_id, next.employee_no, next.name)) next.role = "admin";
     if (body.note !== undefined) next.note = body.note;
     if (body.enabled !== undefined) next.enabled = body.enabled;
     const result = await query<any>(
@@ -874,12 +930,13 @@ export async function registerRoutes(app: FastifyInstance) {
           SET name=$2,
               feishu_user_id=$3,
               employee_no=$4,
-              note=$5,
-              enabled=$6,
+              role=$5,
+              note=$6,
+              enabled=$7,
               updated_at=now()
         WHERE id=$1
         RETURNING *`,
-      [params.id, next.name, next.feishu_user_id, next.employee_no, next.note, next.enabled]
+      [params.id, next.name, next.feishu_user_id, next.employee_no, next.role, next.note, next.enabled]
     );
     await query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, new_value, actor_user_id, actor_name)
@@ -1981,6 +2038,21 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/feishu/bitable/status", async () => feishuService.bitableStatus());
+
+  app.get("/api/admin/feishu/bitable-link", async (request) => {
+    adminOnly(request.user.role);
+    const fallbackUrl = config.feishu.bitableAppToken
+      ? `https://feishu.cn/base/${encodeURIComponent(config.feishu.bitableAppToken)}${config.feishu.demandTableId ? `/table/${encodeURIComponent(config.feishu.demandTableId)}` : ""}`
+      : null;
+    return {
+      url: config.feishu.bitableWebUrl || fallbackUrl,
+      configured: Boolean(config.feishu.bitableWebUrl),
+      fallback: !config.feishu.bitableWebUrl && Boolean(fallbackUrl),
+      message: config.feishu.bitableWebUrl
+        ? "已配置飞书多维表格打开链接。"
+        : "未配置 FEISHU_BITABLE_WEB_URL，已按 app_token 生成默认打开链接。"
+    };
+  });
 
   app.get("/api/feishu/bitable/tables", async (request) => {
     adminOnly(request.user.role);

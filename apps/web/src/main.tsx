@@ -1,15 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { Bell, ClipboardList, Download, Eye, FilePlus2, Filter, GripVertical, LoaderCircle, LogIn, MessageSquare, Network, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
+import { Bell, ClipboardList, Crown, Download, ExternalLink, Eye, FilePlus2, Filter, GripVertical, LoaderCircle, LogIn, MessageSquare, Network, Paperclip, PencilLine, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud, UserPlus } from "lucide-react";
 import type { CurrentUser, FieldConfig, FormType, RecordDetail, RecordSummary } from "@it/shared";
-import { API_BASE_URL, api, setDevIdentity, storeCurrentUser } from "./api";
+import { API_BASE_URL, api, type BitableLink, type ElevatedRole, type FeishuUserSearchResult, setDevIdentity, storeCurrentUser } from "./api";
 import "./styles.css";
 
 type ViewKey = "home" | "submit" | "records" | "admin";
 type WorkViewKey = Exclude<ViewKey, "home">;
 const requireFeishuLogin = import.meta.env.VITE_REQUIRE_FEISHU_LOGIN !== "false";
 const feishuWebAppAutoLogin = import.meta.env.VITE_FEISHU_WEBAPP_AUTO_LOGIN === "true";
+const roleLabels: Record<string, string> = {
+  business: "业务用户",
+  system_owner: "IT管理员",
+  admin: "超级管理员",
+  external: "外部用户"
+};
+
+function roleLabel(role?: string | null) {
+  return roleLabels[role ?? ""] ?? "业务用户";
+}
 
 function isFeishuClient() {
   if (typeof navigator === "undefined") return false;
@@ -354,7 +364,7 @@ function LandingHome({ user, loading, isAdmin, onLogin, onEnter }: {
         </div>
         <div className="landing-user">
           <span>{loading ? "连接中" : user?.name ?? "未登录"}</span>
-          <strong>{loading ? "LOCAL SERVICE" : user?.role === "admin" ? "超级管理员" : user?.role === "system_owner" ? "管理员" : user ? "业务人员" : "FEISHU REQUIRED"}</strong>
+          <strong>{loading ? "LOCAL SERVICE" : user ? roleLabel(user.role) : "FEISHU REQUIRED"}</strong>
         </div>
       </header>
 
@@ -421,8 +431,8 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
   const simulationBackup = localStorage.getItem("superAdminSimulationBackup");
   const canSimulate = user?.role === "admin" || Boolean(simulationBackup);
   const simulationOptions = [
-    { label: "管理员", feishuUserId: "a10986", name: "管理员测试用户", role: "system_owner", department: "管理员名单" },
-    { label: "业务人员", feishuUserId: "a10986", name: "业务测试用户", role: "business", department: "生产制造部" }
+    { label: "IT管理员", feishuUserId: "a10986", name: "IT管理员测试用户", role: "system_owner", department: "权限名单" },
+    { label: "业务用户", feishuUserId: "a10986", name: "业务用户测试用户", role: "business", department: "生产制造部" }
   ];
   const loginWithFeishu = async () => {
     await startFeishuLogin(onToast);
@@ -433,7 +443,7 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
         feishuUserId: user.feishuUserId,
         name: user.name,
         role: user.role,
-        department: user.department ?? "管理员名单"
+        department: user.department ?? "权限名单"
       }));
     }
     setDevIdentity(identity);
@@ -453,7 +463,7 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
     <div className="auth-badge">
       <div>
         <span>{user?.name ?? "未登录"}</span>
-        <strong>{user?.role === "admin" ? "超级管理员" : user?.role === "system_owner" ? "管理员" : "业务人员"}</strong>
+        <strong>{roleLabel(user?.role)}</strong>
       </div>
       {canSimulate ? (
         <div className="identity-switcher">
@@ -1083,6 +1093,7 @@ function AdminPanel() {
   const [owners, setOwners] = useState<any[]>([]);
   const [adminMembers, setAdminMembers] = useState<any[]>([]);
   const [adminRecords, setAdminRecords] = useState<RecordSummary[]>([]);
+  const [bitableLink, setBitableLink] = useState<BitableLink | null>(null);
   const [activeFormType, setActiveFormType] = useState("demand");
   const [newType, setNewType] = useState({ key: "", name: "", description: "" });
   const [newField, setNewField] = useState({
@@ -1095,12 +1106,19 @@ function AdminPanel() {
     options: ""
   });
   const [newOwner, setNewOwner] = useState({ systemName: "", ownerName: "", ownerFeishuUserId: "", consultantNames: "" });
-  const [newAdminMember, setNewAdminMember] = useState({ name: "", feishuUserId: "", employeeNo: "", note: "" });
+  const [ownerSearchResults, setOwnerSearchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [ownerSearchMessage, setOwnerSearchMessage] = useState("");
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
+  const [memberSearchResults, setMemberSearchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [memberSearchMessage, setMemberSearchMessage] = useState("");
+  const [selectedMemberRole, setSelectedMemberRole] = useState<ElevatedRole>("system_owner");
   const [recordFilters, setRecordFilters] = useState({ typeKey: "", systemName: "", query: "" });
   const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
   const [deletingRecords, setDeletingRecords] = useState(false);
   const [creatingOwner, setCreatingOwner] = useState(false);
-  const [creatingAdminMember, setCreatingAdminMember] = useState(false);
+  const [searchingOwner, setSearchingOwner] = useState(false);
+  const [searchingMembers, setSearchingMembers] = useState(false);
+  const [addingMemberId, setAddingMemberId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [importingConfig, setImportingConfig] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -1108,13 +1126,14 @@ function AdminPanel() {
   const [draggingFieldId, setDraggingFieldId] = useState<string | null>(null);
 
   async function refreshAdmin() {
-    Promise.all([api.formTypes(), api.fieldConfigs(), api.owners(), api.records(), api.adminMembers()])
-      .then(([typeData, fieldData, ownerData, recordData, adminMemberData]) => {
+    Promise.all([api.formTypes(), api.fieldConfigs(), api.owners(), api.records(), api.adminMembers(), api.bitableLink().catch(() => null)])
+      .then(([typeData, fieldData, ownerData, recordData, adminMemberData, bitableLinkData]) => {
         setFormTypes(typeData);
         setFields(fieldData);
         setOwners(ownerData);
         setAdminRecords(recordData);
         setAdminMembers(adminMemberData);
+        setBitableLink(bitableLinkData);
       })
       .catch(() => undefined);
   }
@@ -1135,6 +1154,8 @@ function AdminPanel() {
     return true;
   });
   const allFilteredSelected = filteredAdminRecords.length > 0 && filteredAdminRecords.every((record) => selectedRecordIds.includes(record.id));
+  const superAdminCount = adminMembers.filter((member) => member.enabled && member.role === "admin").length;
+  const itAdminCount = adminMembers.filter((member) => member.enabled && member.role !== "admin").length;
 
   function toggleRecord(id: string, checked: boolean) {
     setSelectedRecordIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id));
@@ -1184,13 +1205,97 @@ function AdminPanel() {
     try {
       const backup = JSON.parse(await file.text());
       const result = await api.importConfig(backup);
-      setSyncResult(`配置已恢复：表单 ${result.formTypes}，字段 ${result.fieldConfigs}，系统管理员 ${result.systemOwners}，管理员名单 ${result.adminMembers}，通知规则 ${result.notificationRules}`);
+      setSyncResult(`配置已恢复：表单 ${result.formTypes}，字段 ${result.fieldConfigs}，系统管理员 ${result.systemOwners}，权限名单 ${result.adminMembers}，通知规则 ${result.notificationRules}`);
       await refreshAdmin();
     } catch (error) {
       setSyncResult(error instanceof Error ? `配置导入失败：${error.message}` : "配置导入失败，请检查 JSON 文件。");
     } finally {
       setImportingConfig(false);
     }
+  }
+
+  async function searchPermissionUsers(event?: React.FormEvent) {
+    event?.preventDefault();
+    const keyword = memberSearchQuery.trim();
+    if (!keyword) {
+      setMemberSearchMessage("请输入姓名、工号或关键词");
+      setMemberSearchResults([]);
+      return;
+    }
+    setSearchingMembers(true);
+    setMemberSearchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      setMemberSearchResults(result.users);
+      setMemberSearchMessage(result.users.length ? `找到 ${result.users.length} 个匹配用户` : "没有找到匹配用户");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setMemberSearchResults([]);
+      setMemberSearchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再搜索用户" : message);
+    } finally {
+      setSearchingMembers(false);
+    }
+  }
+
+  async function assignPermissionUser(user: FeishuUserSearchResult) {
+    setAddingMemberId(user.userId);
+    try {
+      await api.createAdminMember({
+        name: user.name,
+        feishuUserId: user.userId,
+        employeeNo: user.userId,
+        role: selectedMemberRole,
+        note: user.department ?? null,
+        enabled: true
+      });
+      setMemberSearchMessage(`${user.name} 已设为${roleLabel(selectedMemberRole)}`);
+      await refreshAdmin();
+    } finally {
+      setAddingMemberId(null);
+    }
+  }
+
+  async function searchOwnerForCreate() {
+    const keyword = newOwner.ownerName.trim();
+    if (!keyword) {
+      setOwnerSearchMessage("请先填写系统管理员姓名");
+      setOwnerSearchResults([]);
+      return;
+    }
+    setSearchingOwner(true);
+    setOwnerSearchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      const exactUser = result.users.find((user) => user.name === keyword) ?? (result.users.length === 1 ? result.users[0] : null);
+      if (exactUser) {
+        setNewOwner((current) => ({
+          ...current,
+          ownerName: exactUser.name,
+          ownerFeishuUserId: exactUser.userId
+        }));
+        setOwnerSearchResults([]);
+        setOwnerSearchMessage(`${exactUser.name} 已匹配 user_id：${exactUser.userId}`);
+      } else {
+        setOwnerSearchResults(result.users);
+        setOwnerSearchMessage(result.users.length ? `找到 ${result.users.length} 个候选，请选择系统管理员` : "没有找到匹配用户");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setOwnerSearchResults([]);
+      setOwnerSearchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再匹配 user_id" : message);
+    } finally {
+      setSearchingOwner(false);
+    }
+  }
+
+  function applyOwnerForCreate(user: FeishuUserSearchResult) {
+    setNewOwner((current) => ({
+      ...current,
+      ownerName: user.name,
+      ownerFeishuUserId: user.userId
+    }));
+    setOwnerSearchResults([]);
+    setOwnerSearchMessage(`${user.name} 已匹配 user_id：${user.userId}`);
   }
 
   return (
@@ -1202,6 +1307,21 @@ function AdminPanel() {
             <p>保存后台配置到本地 JSON；数据库或 Docker 卷异常后可导入恢复。</p>
           </div>
           <div className="backup-actions">
+            {bitableLink?.url ? (
+              <a
+                className="sync-button secondary-sync-button"
+                href={bitableLink.url}
+                target="_blank"
+                rel="noreferrer"
+                title={bitableLink.message}
+              >
+                <ExternalLink size={16} />打开数据库多维表格
+              </a>
+            ) : (
+              <button className="sync-button secondary-sync-button" type="button" disabled title={bitableLink?.message ?? "多维表格链接未配置"}>
+                <ExternalLink size={16} />打开数据库多维表格
+              </button>
+            )}
             <button className="sync-button" type="button" disabled={savingConfig} onClick={downloadConfigBackup}>
               <Download size={16} />{savingConfig ? "保存中..." : "保存配置"}
             </button>
@@ -1410,33 +1530,41 @@ function AdminPanel() {
         </div>
       </section>
       <section className="panel admin-wide admin-member-panel">
-        <div className="panel-title">
-          <h2>管理员名单</h2>
-          <p>用于判定谁是信息数字化部管理员。沈昀初仍是超级管理员；名单中启用的人员拥有记录处理权限，但不能进入后台。</p>
+        <div className="panel-title admin-title-row">
+          <div>
+            <h2>权限控制</h2>
+            <p>超级管理员维护提权名单；名单外人员登录后默认为业务用户。</p>
+          </div>
+          <div className="role-counters">
+            <span><Crown size={15} />超级管理员 {superAdminCount}</span>
+            <span><ShieldCheck size={15} />IT管理员 {itAdminCount}</span>
+          </div>
         </div>
-        <form className="owner-create-form admin-member-create-form" onSubmit={async (event) => {
-          event.preventDefault();
-          setCreatingAdminMember(true);
-          try {
-            await api.createAdminMember({
-              name: newAdminMember.name,
-              feishuUserId: newAdminMember.feishuUserId || null,
-              employeeNo: newAdminMember.employeeNo || null,
-              note: newAdminMember.note || null,
-              enabled: true
-            });
-            setNewAdminMember({ name: "", feishuUserId: "", employeeNo: "", note: "" });
-            await refreshAdmin();
-          } finally {
-            setCreatingAdminMember(false);
-          }
-        }}>
-          <input value={newAdminMember.name} onChange={(event) => setNewAdminMember((current) => ({ ...current, name: event.target.value }))} placeholder="姓名，例如彭涛" required />
-          <input value={newAdminMember.feishuUserId} onChange={(event) => setNewAdminMember((current) => ({ ...current, feishuUserId: event.target.value }))} placeholder="user_id，手动填写" />
-          <input value={newAdminMember.employeeNo} onChange={(event) => setNewAdminMember((current) => ({ ...current, employeeNo: event.target.value }))} placeholder="工号，可选" />
-          <input value={newAdminMember.note} onChange={(event) => setNewAdminMember((current) => ({ ...current, note: event.target.value }))} placeholder="备注，例如 IT 技术" />
-          <button type="submit" disabled={creatingAdminMember}>{creatingAdminMember ? "新增中..." : "新增"}</button>
+        <form className="permission-search-form" onSubmit={searchPermissionUsers}>
+          <div className="permission-search-box">
+            <Search size={17} />
+            <input value={memberSearchQuery} onChange={(event) => setMemberSearchQuery(event.target.value)} placeholder="搜索姓名、工号或关键词" />
+          </div>
+          <select value={selectedMemberRole} onChange={(event) => setSelectedMemberRole(event.target.value as ElevatedRole)}>
+            <option value="system_owner">设为 IT管理员</option>
+            <option value="admin">设为 超级管理员</option>
+          </select>
+          <button type="submit" disabled={searchingMembers}>{searchingMembers ? <LoaderCircle size={16} /> : <Search size={16} />}{searchingMembers ? "搜索中..." : "搜索用户"}</button>
         </form>
+        {memberSearchMessage ? <div className="permission-search-message">{memberSearchMessage}</div> : null}
+        {memberSearchResults.length ? (
+          <div className="permission-search-results">
+            {memberSearchResults.map((user) => (
+              <button key={user.userId} type="button" onClick={() => assignPermissionUser(user)} disabled={addingMemberId === user.userId}>
+                <UserPlus size={16} />
+                <strong>{user.name}</strong>
+                <span>{user.userId}</span>
+                <em>{user.department ?? "未返回部门"}</em>
+                <small>{addingMemberId === user.userId ? "添加中..." : roleLabel(selectedMemberRole)}</small>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="admin-list">
           {adminMembers.map((member) => <AdminMemberRow key={member.id} member={member} onSave={async (values) => {
             await api.updateAdminMember(member.id, values);
@@ -1445,7 +1573,7 @@ function AdminPanel() {
         </div>
       </section>
       <section className="panel admin-wide owner-admin-panel">
-        <div className="panel-title"><h2>管理员配置</h2><p>按系统匹配信息数字化部管理员；未匹配时转彭涛。</p></div>
+        <div className="panel-title"><h2>系统管理员配置</h2><p>按系统匹配信息数字化部管理员；可用飞书搜索自动匹配 user_id，未匹配时转彭涛。</p></div>
         <form className="owner-create-form" onSubmit={async (event) => {
           event.preventDefault();
           setCreatingOwner(true);
@@ -1465,10 +1593,28 @@ function AdminPanel() {
         }}>
           <input value={newOwner.systemName} onChange={(event) => setNewOwner((current) => ({ ...current, systemName: event.target.value }))} placeholder="系统名称" required />
           <input value={newOwner.ownerName} onChange={(event) => setNewOwner((current) => ({ ...current, ownerName: event.target.value }))} placeholder="管理员" required />
-          <input value={newOwner.ownerFeishuUserId} onChange={(event) => setNewOwner((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} placeholder="user_id，手动填写" />
+          <div className="owner-userid-cell">
+            <input value={newOwner.ownerFeishuUserId} onChange={(event) => setNewOwner((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} placeholder="user_id，可搜索匹配" />
+            <button className="secondary-command owner-match-button" type="button" disabled={searchingOwner} onClick={searchOwnerForCreate}>
+              {searchingOwner ? <LoaderCircle size={15} /> : <Search size={15} />}
+              {searchingOwner ? "匹配中" : "匹配"}
+            </button>
+          </div>
           <input value={newOwner.consultantNames} onChange={(event) => setNewOwner((current) => ({ ...current, consultantNames: event.target.value }))} placeholder="顾问" />
           <button type="submit" disabled={creatingOwner}>{creatingOwner ? "新增中..." : "新增"}</button>
         </form>
+        {ownerSearchMessage ? <div className="permission-search-message">{ownerSearchMessage}</div> : null}
+        {ownerSearchResults.length ? (
+          <div className="owner-match-results">
+            {ownerSearchResults.map((user) => (
+              <button key={user.userId} type="button" onClick={() => applyOwnerForCreate(user)}>
+                <strong>{user.name}</strong>
+                <span>{user.userId}</span>
+                <em>{user.department ?? "未返回部门"}</em>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="admin-list">
           {owners.map((owner) => <OwnerRow key={owner.id} owner={owner} onSave={async (values) => {
             await api.updateOwner(owner.id, values);
@@ -1489,6 +1635,7 @@ function AdminMemberRow({ member, onSave }: {
     name: member.name ?? "",
     feishuUserId: member.feishuUserId ?? "",
     employeeNo: member.employeeNo ?? "",
+    role: (member.role ?? "system_owner") as ElevatedRole,
     note: member.note ?? "",
     enabled: member.enabled ?? true
   });
@@ -1498,6 +1645,7 @@ function AdminMemberRow({ member, onSave }: {
       name: member.name ?? "",
       feishuUserId: member.feishuUserId ?? "",
       employeeNo: member.employeeNo ?? "",
+      role: (member.role ?? "system_owner") as ElevatedRole,
       note: member.note ?? "",
       enabled: member.enabled ?? true
     });
@@ -1513,9 +1661,15 @@ function AdminMemberRow({ member, onSave }: {
         setSaving(false);
       }
     }}>
-      <ShieldCheck size={16} />
-      <label><span>姓名</span><input value={values.name} onChange={(event) => setValues((current) => ({ ...current, name: event.target.value }))} aria-label={`${member.name}姓名`} /></label>
-      <label><span>user_id</span><input value={values.feishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, feishuUserId: event.target.value }))} aria-label={`${member.name}user_id`} placeholder="手动填写" /></label>
+      {values.role === "admin" ? <Crown size={16} /> : <ShieldCheck size={16} />}
+      <div className="permission-user-cell">
+        <strong>{values.name}</strong>
+        <span>{values.feishuUserId || "未绑定 user_id"}</span>
+      </div>
+      <label><span>角色</span><select value={values.role} onChange={(event) => setValues((current) => ({ ...current, role: event.target.value as ElevatedRole }))} aria-label={`${member.name}角色`}>
+        <option value="system_owner">IT管理员</option>
+        <option value="admin">超级管理员</option>
+      </select></label>
       <label><span>工号</span><input value={values.employeeNo ?? ""} onChange={(event) => setValues((current) => ({ ...current, employeeNo: event.target.value }))} aria-label={`${member.name}工号`} placeholder="可选" /></label>
       <label><span>备注</span><input value={values.note ?? ""} onChange={(event) => setValues((current) => ({ ...current, note: event.target.value }))} aria-label={`${member.name}备注`} placeholder="所属小组" /></label>
       <label className="owner-enabled"><input type="checkbox" checked={values.enabled} onChange={(event) => setValues((current) => ({ ...current, enabled: event.target.checked }))} />启用</label>
@@ -1529,6 +1683,9 @@ function OwnerRow({ owner, onSave }: {
   onSave: (values: Record<string, unknown>) => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
+  const [matching, setMatching] = useState(false);
+  const [matchResults, setMatchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [matchMessage, setMatchMessage] = useState("");
   const [values, setValues] = useState({
     ownerName: owner.ownerName ?? "",
     ownerFeishuUserId: owner.ownerFeishuUserId ?? "",
@@ -1545,6 +1702,50 @@ function OwnerRow({ owner, onSave }: {
     });
   }, [owner]);
 
+  async function applyMatchedUser(user: FeishuUserSearchResult) {
+    const nextValues = {
+      ...values,
+      ownerName: user.name,
+      ownerFeishuUserId: user.userId
+    };
+    setValues(nextValues);
+    setMatchResults([]);
+    setSaving(true);
+    try {
+      await onSave(nextValues);
+      setMatchMessage(`${user.name} 已匹配并保存 user_id：${user.userId}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function matchOwnerUser() {
+    const keyword = values.ownerName.trim();
+    if (!keyword) {
+      setMatchMessage("请先填写系统管理员姓名");
+      setMatchResults([]);
+      return;
+    }
+    setMatching(true);
+    setMatchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      const exactUser = result.users.find((user) => user.name === keyword) ?? (result.users.length === 1 ? result.users[0] : null);
+      if (exactUser) {
+        await applyMatchedUser(exactUser);
+      } else {
+        setMatchResults(result.users);
+        setMatchMessage(result.users.length ? `找到 ${result.users.length} 个候选，请选择` : "没有找到匹配用户");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setMatchResults([]);
+      setMatchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再匹配 user_id" : message);
+    } finally {
+      setMatching(false);
+    }
+  }
+
   return (
     <form className="owner-row" onSubmit={async (event) => {
       event.preventDefault();
@@ -1558,10 +1759,28 @@ function OwnerRow({ owner, onSave }: {
       <ShieldCheck size={16} />
       <div className="owner-system-name"><span>系统</span><strong>{owner.systemName}</strong></div>
       <label><span>管理员</span><input value={values.ownerName} onChange={(event) => setValues((current) => ({ ...current, ownerName: event.target.value }))} aria-label={`${owner.systemName}管理员`} /></label>
-      <label><span>user_id</span><input value={values.ownerFeishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} aria-label={`${owner.systemName}user_id`} placeholder="手动填写" /></label>
+      <div className="owner-userid-cell">
+        <label><span>user_id</span><input value={values.ownerFeishuUserId ?? ""} onChange={(event) => setValues((current) => ({ ...current, ownerFeishuUserId: event.target.value }))} aria-label={`${owner.systemName}user_id`} placeholder="可搜索匹配" /></label>
+        <button className="secondary-command owner-match-button" type="button" disabled={matching || saving} onClick={matchOwnerUser}>
+          {matching ? <LoaderCircle size={15} /> : <Search size={15} />}
+          {matching ? "匹配中" : "匹配"}
+        </button>
+      </div>
       <label><span>顾问</span><input value={values.consultantNames ?? ""} onChange={(event) => setValues((current) => ({ ...current, consultantNames: event.target.value }))} aria-label={`${owner.systemName}顾问`} placeholder="顾问" /></label>
       <label className="owner-enabled"><input type="checkbox" checked={values.enabled} onChange={(event) => setValues((current) => ({ ...current, enabled: event.target.checked }))} />启用</label>
       <button type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
+      {matchMessage ? <div className="owner-match-message">{matchMessage}</div> : null}
+      {matchResults.length ? (
+        <div className="owner-match-results">
+          {matchResults.map((user) => (
+            <button key={user.userId} type="button" onClick={() => applyMatchedUser(user)}>
+              <strong>{user.name}</strong>
+              <span>{user.userId}</span>
+              <em>{user.department ?? "未返回部门"}</em>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </form>
   );
 }

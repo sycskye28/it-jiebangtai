@@ -1,5 +1,22 @@
 import type { FieldConfig, FormType, RecordDetail, RecordSummary, CurrentUser } from "@it/shared";
 
+export type ElevatedRole = "system_owner" | "admin";
+
+export type FeishuUserSearchResult = {
+  userId: string;
+  openId: string | null;
+  name: string;
+  department: string | null;
+  avatarUrl: string | null;
+};
+
+export type BitableLink = {
+  url: string | null;
+  configured: boolean;
+  fallback: boolean;
+  message: string;
+};
+
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
 if (typeof localStorage !== "undefined" && localStorage.getItem("devUserId") === "dev-admin") {
@@ -43,7 +60,7 @@ async function request<T>(path: string, options: RequestInit = {}) {
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.detail ?? error.error ?? response.statusText);
+    throw new Error(error.detail ?? error.message ?? error.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
 }
@@ -120,6 +137,10 @@ export const api = {
     body: JSON.stringify(values)
   }),
   adminMembers: () => request<any[]>("/api/admin/admin-members"),
+  bitableLink: () => request<BitableLink>("/api/admin/feishu/bitable-link"),
+  searchFeishuUsers: (query: string) => request<{ users: FeishuUserSearchResult[]; hasMore: boolean; pageToken: string | null }>(
+    `/api/admin/feishu/users/search?query=${encodeURIComponent(query)}`
+  ),
   createAdminMember: (values: Record<string, unknown>) => request<any>("/api/admin/admin-members", {
     method: "POST",
     body: JSON.stringify(values)

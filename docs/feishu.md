@@ -22,20 +22,14 @@ FEISHU_REQUIRE_REAL_API=true
 FEISHU_MESSAGE_RECEIVE_ID_TYPE=user_id
 ```
 
-## 按姓名自动匹配 user_id
+## 搜索选择权限名单
 
-系统管理员配置支持只填写姓名，例如 `沈昀初`、`彭涛`：
+超级管理员在后台“权限控制”中搜索飞书用户，并将用户设置为 `IT管理员` 或 `超级管理员`：
 
-- 后端会先查本系统中已经登录过的用户。
-- 本地没有唯一匹配时，会调用飞书通讯录接口获取应用可见范围内的用户列表，并按姓名精确匹配。
-- 唯一匹配成功后，自动写入 `owner_feishu_user_id`，后续飞书消息会发给这个 `user_id`。
-- 如果姓名重复、查不到、或飞书应用没有通讯录权限，则不会阻塞保存，但 `user_id` 会保持为空，需要手动补充。
-
-需要的飞书权限：
-
-- 获取通讯录基本信息，或以应用身份访问通讯录。
-- 获取用户 user ID。
-- 通讯录数据权限范围需要覆盖后台“管理员名单”和“系统管理员配置”中的人员。
+- 搜索调用飞书 `GET /open-apis/search/v1/user`。
+- 该接口使用用户身份 `user_access_token`，需要开通 `contact:user:search` 权限。
+- 如果当前登录用户没有有效 `feishu_user_access_token`，后端返回 `missing_user_token`，需要重新飞书登录。
+- 权限名单外的人员登录后默认为 `业务用户`。
 
 ## 管理员身份判定
 
@@ -44,8 +38,9 @@ FEISHU_MESSAGE_RECEIVE_ID_TYPE=user_id
 当前规则：
 
 - `沈昀初 / a10986` 固定为超级管理员，可进入后台。
-- 后台“管理员名单”中启用的人员为管理员，可处理记录、编辑字段、追加系统、转换类型等。
-- 其他人员为业务人员。
+- 后台“权限控制”中启用且角色为 `超级管理员` 的人员可进入后台。
+- 后台“权限控制”中启用且角色为 `IT管理员` 的人员可处理记录、编辑字段、追加系统、转换类型等。
+- 其他人员为业务用户。
 - 飞书返回的部门信息只做展示和留档，不再决定管理员权限。
 
 ## 当前飞书提醒内容与触发条件
@@ -158,7 +153,7 @@ FEISHU_MESSAGE_RECEIVE_ID_TYPE=user_id
 - 需求与问题相互转换。
 - 删除记录。
 - 从飞书多维表格同步记录。
-- 后台字段配置、管理员配置等变更。
+- 后台字段配置、系统管理员配置等变更。
 
 ## 第一步：连接检查
 
@@ -222,6 +217,7 @@ curl -X POST http://localhost:4000/api/auth/feishu/login \
 
 ```bash
 FEISHU_BITABLE_APP_TOKEN=多维表格 app_token
+FEISHU_BITABLE_WEB_URL=浏览器中可直接打开的多维表格链接
 FEISHU_DEMAND_TABLE_ID=需求表 table_id
 FEISHU_ISSUE_TABLE_ID=问题表 table_id
 FEISHU_SYSTEM_OWNER_TABLE_ID=系统管理员表 table_id
