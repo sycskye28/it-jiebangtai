@@ -1,11 +1,13 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { Bell, ClipboardList, Clock3, Download, Eye, FilePlus2, Filter, GripVertical, LayoutDashboard, LoaderCircle, LogIn, MessageSquare, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Trash2, UploadCloud } from "lucide-react";
+import { Bell, ClipboardList, Download, Eye, FilePlus2, Filter, GripVertical, LoaderCircle, LogIn, MessageSquare, Network, Paperclip, PencilLine, Save, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
 import type { CurrentUser, FieldConfig, FormType, RecordDetail, RecordSummary } from "@it/shared";
 import { API_BASE_URL, api, setDevIdentity, storeCurrentUser } from "./api";
 import "./styles.css";
 
-type ViewKey = "submit" | "records" | "admin";
+type ViewKey = "home" | "submit" | "records" | "admin";
+type WorkViewKey = Exclude<ViewKey, "home">;
 const requireFeishuLogin = import.meta.env.VITE_REQUIRE_FEISHU_LOGIN !== "false";
 const feishuWebAppAutoLogin = import.meta.env.VITE_FEISHU_WEBAPP_AUTO_LOGIN === "true";
 
@@ -23,7 +25,8 @@ function isUnauthenticatedUser(user: CurrentUser | null) {
   return !user || ["anonymous", "dev-admin"].includes(user.feishuUserId);
 }
 
-async function startFeishuLogin(onToast: (message: string) => void) {
+async function startFeishuLogin(onToast: (message: string) => void, nextView?: WorkViewKey) {
+  if (nextView) sessionStorage.setItem("postLoginView", nextView);
   const oauth = await api.feishuOAuthUrl(currentRedirectUri());
   if (!oauth.configured) {
     onToast("飞书应用 App ID 未配置");
@@ -33,7 +36,7 @@ async function startFeishuLogin(onToast: (message: string) => void) {
 }
 
 function App() {
-  const [view, setView] = useState<ViewKey>("submit");
+  const [view, setView] = useState<ViewKey>("home");
   const [formTypes, setFormTypes] = useState<FormType[]>([]);
   const [activeType, setActiveType] = useState("demand");
   const [fields, setFields] = useState<FieldConfig[]>([]);
@@ -44,6 +47,8 @@ function App() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [detailFields, setDetailFields] = useState<FieldConfig[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fieldsLoading, setFieldsLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [busyMessage, setBusyMessage] = useState("");
   const [toast, setToast] = useState("");
 
@@ -70,8 +75,11 @@ function App() {
         .then(({ user }) => {
           storeCurrentUser(user);
           setCurrentUser(user);
+          const nextView = sessionStorage.getItem("postLoginView") as WorkViewKey | null;
+          sessionStorage.removeItem("postLoginView");
           sessionStorage.removeItem("feishuAutoLoginStarted");
           window.history.replaceState({}, "", window.location.pathname);
+          setView(nextView ?? "submit");
           return refresh();
         })
         .catch((error) => setToast(error.message));
@@ -82,27 +90,57 @@ function App() {
 
   useEffect(() => {
     if (!feishuWebAppAutoLogin || !isFeishuClient()) return;
+    if (view === "home") return;
     if (loading || !requireFeishuLogin || !isUnauthenticatedUser(currentUser)) return;
     if (sessionStorage.getItem("feishuAutoLoginStarted")) return;
     sessionStorage.setItem("feishuAutoLoginStarted", "1");
-    startFeishuLogin(setToast).catch((error) => setToast(error.message));
-  }, [loading, currentUser?.feishuUserId]);
+    startFeishuLogin(setToast, view).catch((error) => setToast(error.message));
+  }, [loading, currentUser?.feishuUserId, view]);
 
   useEffect(() => {
-    api.formConfig(activeType).then((config) => setFields(config.fields)).catch((error) => setToast(error.message));
+    let alive = true;
+    setFieldsLoading(true);
+    api.formConfig(activeType)
+      .then((config) => {
+        if (alive) setFields(config.fields);
+      })
+      .catch((error) => setToast(error.message))
+      .finally(() => {
+        if (alive) setFieldsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [activeType]);
 
   useEffect(() => {
     if (!selectedRecordId) {
       setRecordDetail(null);
       setDetailFields([]);
+      setDetailLoading(false);
       return;
     }
-    api.record(selectedRecordId).then(setRecordDetail).catch((error) => setToast(error.message));
+    let alive = true;
+    setDetailLoading(true);
+    setRecordDetail(null);
+    api.record(selectedRecordId)
+      .then((detail) => {
+        if (alive) setRecordDetail(detail);
+      })
+      .catch((error) => setToast(error.message))
+      .finally(() => {
+        if (alive) setDetailLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [selectedRecordId]);
 
   useEffect(() => {
-    if (!recordDetail?.typeKey) return;
+    if (!recordDetail?.typeKey) {
+      setDetailFields([]);
+      return;
+    }
     api.formConfig(recordDetail.typeKey).then((config) => setDetailFields(config.fields)).catch((error) => setToast(error.message));
   }, [recordDetail?.id, recordDetail?.typeKey]);
 
@@ -114,12 +152,6 @@ function App() {
 
   const selectedType = formTypes.find((item) => item.key === activeType);
   const isAdmin = currentUser?.role === "admin";
-  const stats = useMemo(() => {
-    const open = records.filter((record) => record.status !== "已关闭").length;
-    const delayed = records.filter((record) => record.status.includes("延期") || record.status.includes("异常")).length;
-    const mine = records.length;
-    return { open, delayed, mine };
-  }, [records]);
 
   async function runBusy<T>(message: string, task: () => Promise<T>) {
     setBusyMessage(message);
@@ -130,8 +162,24 @@ function App() {
     }
   }
 
-  return (
-    <main className="shell">
+  async function enterWorkView(nextView: WorkViewKey) {
+    if (requireFeishuLogin && isUnauthenticatedUser(currentUser)) {
+      await startFeishuLogin(setToast, nextView);
+      return;
+    }
+    setView(nextView);
+  }
+
+  const appContent = view === "home" ? (
+    <LandingHome
+      user={currentUser}
+      loading={loading}
+      isAdmin={isAdmin}
+      onLogin={(nextView) => startFeishuLogin(setToast, nextView)}
+      onEnter={enterWorkView}
+    />
+  ) : (
+    <>
       <aside className="rail">
         <div className="brand">
           <div className="brand-mark"><img src="/dcec-logo-transparent.png" alt="DCEC" /></div>
@@ -143,6 +191,7 @@ function App() {
         <button className={view === "submit" ? "nav active" : "nav"} onClick={() => setView("submit")}><FilePlus2 size={18} />提交</button>
         <button className={view === "records" ? "nav active" : "nav"} onClick={() => setView("records")}><ClipboardList size={18} />记录</button>
         {isAdmin ? <button className={view === "admin" ? "nav active" : "nav"} onClick={() => setView("admin")}><Settings2 size={18} />后台</button> : null}
+        <button className="nav nav-home" onClick={() => setView("home")}><Sparkles size={18} />主页</button>
         <div className="rail-card">
           <Bell size={18} />
           <span>关键节点会通知提交人与管理员。</span>
@@ -160,12 +209,6 @@ function App() {
           </div>
         </header>
 
-        <section className="metrics">
-          <Metric icon={<LayoutDashboard size={18} />} label="开放记录" value={stats.open} />
-          <Metric icon={<Clock3 size={18} />} label="异常/延期" value={stats.delayed} />
-          <Metric icon={<ShieldCheck size={18} />} label="可见记录" value={stats.mine} />
-        </section>
-
         {loading ? <div className="empty">正在连接本地服务...</div> : null}
         {!loading && requireFeishuLogin && isUnauthenticatedUser(currentUser) ? (
           <LoginRequiredPanel onToast={setToast} />
@@ -177,6 +220,7 @@ function App() {
             activeType={activeType}
             selectedType={selectedType}
             fields={fields}
+            fieldsLoading={fieldsLoading}
             owners={owners}
             onTypeChange={setActiveType}
             onSubmit={async (values) => {
@@ -200,6 +244,7 @@ function App() {
             currentUser={currentUser}
             selectedRecordId={selectedRecordId}
             detail={recordDetail}
+            detailLoading={detailLoading}
             onSelect={setSelectedRecordId}
             onRefreshFields={async (typeKey) => {
               const config = await api.formConfig(typeKey);
@@ -266,6 +311,12 @@ function App() {
           isAdmin ? <AdminPanel /> : <div className="empty">你当前没有后台管理权限。</div>
         ) : null}
       </section>
+    </>
+  );
+
+  return (
+    <main className={`shell view-${view}`}>
+      {appContent}
       {busyMessage ? (
         <div className="busy-overlay" aria-live="polite">
           <div className="busy-card">
@@ -280,8 +331,89 @@ function App() {
   );
 }
 
-function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
-  return <div className="metric">{icon}<span>{label}</span><strong>{value}</strong></div>;
+function LandingHome({ user, loading, isAdmin, onLogin, onEnter }: {
+  user: CurrentUser | null;
+  loading: boolean;
+  isAdmin: boolean;
+  onLogin: (nextView: WorkViewKey) => Promise<void>;
+  onEnter: (nextView: WorkViewKey) => Promise<void>;
+}) {
+  const needsLogin = requireFeishuLogin && isUnauthenticatedUser(user);
+
+  return (
+    <section className="landing-home" aria-label="IT 揭榜台主页">
+      <div className="landing-bg" />
+      <div className="landing-scanline" />
+      <header className="landing-top">
+        <div className="landing-brand">
+          <img src="/dcec-logo-transparent.png" alt="DCEC" />
+          <div>
+            <strong>东风康明斯 IT 揭榜台</strong>
+            <span>Demand · Issue · Feishu Workflow</span>
+          </div>
+        </div>
+        <div className="landing-user">
+          <span>{loading ? "连接中" : user?.name ?? "未登录"}</span>
+          <strong>{loading ? "LOCAL SERVICE" : user?.role === "admin" ? "超级管理员" : user?.role === "system_owner" ? "管理员" : user ? "业务人员" : "FEISHU REQUIRED"}</strong>
+        </div>
+      </header>
+
+      <div className="landing-orbit" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+
+      <div className="landing-content">
+        <div className="landing-copy">
+          <span className="landing-kicker"><Sparkles size={16} />Digital ignition desk</span>
+          <h1>IT 需求与问题入口</h1>
+          <p>提交、分派、处理、追踪和飞书同步拆成清晰路径。登录后选择你的工作入口，进入真正的业务页面。</p>
+          <div className="landing-actions">
+            <button className="landing-primary" type="button" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
+              {needsLogin ? <LogIn size={20} /> : <FilePlus2 size={20} />}
+              {needsLogin ? "飞书登录后提交" : "进入提交"}
+            </button>
+            <button className="landing-secondary" type="button" onClick={() => needsLogin ? onLogin("records") : onEnter("records")}>
+              <ClipboardList size={20} />
+              {needsLogin ? "登录后看记录" : "查看记录"}
+            </button>
+          </div>
+        </div>
+
+        <div className="landing-entry-grid">
+          <button type="button" className="landing-entry main-entry" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
+            <FilePlus2 size={26} />
+            <span>提交入口</span>
+            <strong>需求 / 问题统一发起</strong>
+          </button>
+          <button type="button" className="landing-entry" onClick={() => needsLogin ? onLogin("records") : onEnter("records")}>
+            <ClipboardList size={24} />
+            <span>记录追踪</span>
+            <strong>查看状态、附件和时间线</strong>
+          </button>
+          {isAdmin ? (
+            <button type="button" className="landing-entry" onClick={() => onEnter("admin")}>
+              <Settings2 size={24} />
+              <span>配置后台</span>
+              <strong>维护表单、系统责任人</strong>
+            </button>
+          ) : (
+            <div className="landing-entry ghost-entry">
+              <ShieldCheck size={24} />
+              <span>飞书身份</span>
+              <strong>{needsLogin ? "先登录再进入工作区" : "权限已识别"}</strong>
+            </div>
+          )}
+          <div className="landing-entry ghost-entry">
+            <Network size={24} />
+            <span>闭环同步</span>
+            <strong>本地数据与飞书流程联动</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (message: string) => void }) {
@@ -360,11 +492,12 @@ function LoginRequiredPanel({ onToast }: { onToast: (message: string) => void })
   );
 }
 
-function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTypeChange, onSubmit }: {
+function SubmitPanel({ formTypes, activeType, selectedType, fields, fieldsLoading, owners, onTypeChange, onSubmit }: {
   formTypes: FormType[];
   activeType: string;
   selectedType?: FormType;
   fields: FieldConfig[];
+  fieldsLoading: boolean;
   owners: Array<{ systemName: string; ownerName: string }>;
   onTypeChange: (type: string) => void;
   onSubmit: (values: Record<string, unknown>) => Promise<void>;
@@ -372,6 +505,11 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const businessFields = fields.filter((field) => field.visibleToBusiness && field.editableByBusiness);
+  const activeTypeIndex = Math.max(0, formTypes.findIndex((type) => type.key === activeType));
+  const switchStyle = {
+    "--active-index": activeTypeIndex,
+    "--item-count": Math.max(formTypes.length, 1)
+  } as React.CSSProperties;
 
   useEffect(() => {
     const initial: Record<string, unknown> = {};
@@ -385,16 +523,35 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
   return (
     <div className="submit-layout">
       <section className="panel primary-panel">
-        <div className="segmented">
+        <div className="segmented type-switch" style={switchStyle}>
           {formTypes.map((type) => (
-            <button key={type.key} className={activeType === type.key ? "selected" : ""} onClick={() => onTypeChange(type.key)}>{type.name}</button>
+            <button
+              key={type.key}
+              type="button"
+              className={activeType === type.key ? "selected" : ""}
+              aria-pressed={activeType === type.key}
+              onClick={() => {
+                if (activeType !== type.key) onTypeChange(type.key);
+              }}
+            >
+              {type.name}
+            </button>
           ))}
         </div>
-        <div className="panel-title">
+        <div className="panel-title form-copy-stage" key={`title-${activeType}`}>
           <h2>{selectedType?.name ?? "提交"}</h2>
           <p>{selectedType?.description}</p>
         </div>
-        <form className="dynamic-form" onSubmit={async (event) => {
+        {fieldsLoading ? (
+          <div className="form-skeleton" aria-label="表单切换中">
+            <span />
+            <span />
+            <span />
+            <span />
+            <span className="wide" />
+          </div>
+        ) : (
+        <form key={activeType} className="dynamic-form form-stage" onSubmit={async (event) => {
           event.preventDefault();
           setSubmitting(true);
           try {
@@ -423,6 +580,7 @@ function SubmitPanel({ formTypes, activeType, selectedType, fields, owners, onTy
             {submitting ? "提交中..." : "提交并自动分派"}
           </button>
         </form>
+        )}
       </section>
     </div>
   );
@@ -611,7 +769,7 @@ function DynamicField({ field, value, onChange, onUpload }: {
   );
 }
 
-function RecordsPanel({ records, formTypes, owners, fields, currentUser, selectedRecordId, detail, onSelect, onRefreshFields, onSave, onCloneSystems, onConvert, onComment, onSyncRecords }: {
+function RecordsPanel({ records, formTypes, owners, fields, currentUser, selectedRecordId, detail, detailLoading, onSelect, onRefreshFields, onSave, onCloneSystems, onConvert, onComment, onSyncRecords }: {
   records: RecordSummary[];
   formTypes: FormType[];
   owners: Array<{ systemName: string; ownerName: string }>;
@@ -619,6 +777,7 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
   currentUser: CurrentUser | null;
   selectedRecordId: string | null;
   detail: RecordDetail | null;
+  detailLoading: boolean;
   onSelect: (id: string) => void;
   onRefreshFields: (typeKey: string) => Promise<FieldConfig[]>;
   onSave: (id: string, values: Record<string, unknown>) => Promise<void>;
@@ -714,8 +873,16 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
           ))}
         </section>
       <section className="panel detail-panel">
-        {detail ? (
-          <>
+        {detailLoading ? (
+          <div className="detail-placeholder" aria-label="记录详情加载中">
+            <span className="detail-skeleton-title" />
+            <span />
+            <span />
+            <span />
+            <span className="wide" />
+          </div>
+        ) : detail ? (
+          <div key={detail.id} className="detail-content">
             <div className="detail-head">
               <div>
                 <h2>{detail.title}</h2>
@@ -743,7 +910,7 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
                 setEditorOpen(true);
               }}><PencilLine size={16} />打开完整字段编辑</button>
             </div> : null}
-            {editorOpen ? (
+            {editorOpen ? createPortal(
               <div className="modal-backdrop" role="dialog" aria-modal="true">
                 <div className="record-modal">
                   <div className="modal-head">
@@ -772,7 +939,8 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
                     }}
                   />
                 </div>
-              </div>
+              </div>,
+              document.body
             ) : null}
             <h3>时间线</h3>
             <ul className="timeline-list compact">
@@ -798,7 +966,7 @@ function RecordsPanel({ records, formTypes, owners, fields, currentUser, selecte
               <input value={comment} onChange={(event) => setComment(event.target.value)} placeholder="追加评论或补充说明" />
               <button type="submit">发送</button>
             </form> : null}
-          </>
+          </div>
         ) : <div className="empty">选择一条记录查看详情</div>}
       </section>
       </div>
