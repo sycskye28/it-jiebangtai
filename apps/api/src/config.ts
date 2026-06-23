@@ -33,10 +33,17 @@ export const config = {
     encryptKey: process.env.FEISHU_ENCRYPT_KEY ?? "",
     webRedirectUri: process.env.FEISHU_WEB_REDIRECT_URI ?? "http://localhost:5173",
     bitableAppToken: process.env.FEISHU_BITABLE_APP_TOKEN ?? "",
+    bitableWebUrl: process.env.FEISHU_BITABLE_WEB_URL ?? "",
     demandTableId: process.env.FEISHU_DEMAND_TABLE_ID ?? "",
     issueTableId: process.env.FEISHU_ISSUE_TABLE_ID ?? "",
+    innovationTableId: process.env.FEISHU_INNOVATION_TABLE_ID ?? "",
+    innovationNotifyUserIds: (process.env.FEISHU_INNOVATION_NOTIFY_USER_IDS ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
     systemOwnerTableId: process.env.FEISHU_SYSTEM_OWNER_TABLE_ID ?? "",
     requireRealApi: process.env.FEISHU_REQUIRE_REAL_API === "true",
-    messageReceiveIdType: process.env.FEISHU_MESSAGE_RECEIVE_ID_TYPE ?? "user_id"
+    messageReceiveIdType: process.env.FEISHU_MESSAGE_RECEIVE_ID_TYPE ?? "user_id",
+    notificationsDisabled: process.env.FEISHU_NOTIFICATIONS_DISABLED === "true"
   }
 };

@@ -32,11 +32,11 @@ function isSuperAdminIdentity(feishuUserId: string, employeeNo?: string | null, 
   return normalizedId === "a10986" || normalizedEmployeeNo === "a10986" || name === "沈昀初";
 }
 
-async function isAdminMemberIdentity(feishuUserId: string, employeeNo?: string | null, name?: string | null) {
+async function getAdminMemberRole(feishuUserId: string, employeeNo?: string | null, name?: string | null): Promise<AuthUser["role"] | null> {
   const ids = [feishuUserId, employeeNo].map((item) => String(item ?? "").trim().toLowerCase()).filter(Boolean);
   const normalizedName = String(name ?? "").trim();
-  const result = await query(
-    `SELECT id
+  const result = await query<{ role: AuthUser["role"] }>(
+    `SELECT role
        FROM admin_members
       WHERE enabled = true
         AND (
@@ -47,7 +47,7 @@ async function isAdminMemberIdentity(feishuUserId: string, employeeNo?: string |
       LIMIT 1`,
     [ids, normalizedName]
   );
-  return Boolean(result.rows[0]);
+  return result.rows[0]?.role === "admin" ? "admin" : result.rows[0]?.role === "system_owner" ? "system_owner" : null;
 }
 
 export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
@@ -64,11 +64,10 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
         ? String(userInfo.departmentName)
         : null;
   const avatarUrl = userInfo.avatar_url ? String(userInfo.avatar_url) : null;
+  const configuredRole = await getAdminMemberRole(userId || openId, employeeNo, name);
   const role: AuthUser["role"] = isSuperAdminIdentity(userId || openId, employeeNo, name)
     ? "admin"
-    : await isAdminMemberIdentity(userId || openId, employeeNo, name)
-      ? "system_owner"
-      : "business";
+    : configuredRole ?? "business";
 
   if (!userId && !openId) {
     throw new Error("Feishu user info does not contain user_id or open_id.");
@@ -93,15 +92,26 @@ export async function upsertFeishuLoginUser(userInfo: Record<string, unknown>) {
   return toAuthUser(result.rows[0]);
 }
 
-export async function storeFeishuUserAccessToken(feishuUserId: string, accessToken: string, expiresInSeconds: number) {
-  const expiresAt = new Date(Date.now() + Math.max(60, expiresInSeconds - 120) * 1000);
+export async function storeFeishuUserTokens(input: {
+  feishuUserId: string;
+  accessToken: string;
+  expiresInSeconds: number;
+  refreshToken?: string | null;
+  refreshExpiresInSeconds?: number | null;
+}) {
+  const expiresAt = new Date(Date.now() + Math.max(60, input.expiresInSeconds - 120) * 1000);
+  const refreshExpiresAt = input.refreshExpiresInSeconds
+    ? new Date(Date.now() + Math.max(60, input.refreshExpiresInSeconds - 120) * 1000)
+    : null;
   await query(
     `UPDATE users
         SET feishu_user_access_token = $2,
             feishu_user_token_expires_at = $3,
+            feishu_user_refresh_token = COALESCE($4, feishu_user_refresh_token),
+            feishu_user_refresh_expires_at = COALESCE($5, feishu_user_refresh_expires_at),
             updated_at = now()
       WHERE feishu_user_id = $1`,
-    [feishuUserId, accessToken, expiresAt]
+    [input.feishuUserId, input.accessToken, expiresAt, input.refreshToken ?? null, refreshExpiresAt]
   );
 }
 
@@ -118,6 +128,25 @@ export async function getValidFeishuUserAccessToken(userId: string) {
   return result.rows[0]?.feishu_user_access_token ?? null;
 }
 
+export async function getFeishuUserTokenState(userId: string) {
+  const result = await query<{
+    feishu_user_access_token: string | null;
+    feishu_user_token_expires_at: Date | null;
+    feishu_user_refresh_token: string | null;
+    feishu_user_refresh_expires_at: Date | null;
+  }>(
+    `SELECT feishu_user_access_token,
+            feishu_user_token_expires_at,
+            feishu_user_refresh_token,
+            feishu_user_refresh_expires_at
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [userId]
+  );
+  return result.rows[0] ?? null;
+}
+
 function decodeHeaderValue(value: string) {
   try {
     return decodeURIComponent(value);
@@ -132,15 +161,14 @@ export async function ensureDevUser(headers: Record<string, string | string[] | 
   const department = decodeHeaderValue(String(headers["x-dev-department"] ?? ""));
   const requestedRole = String(headers["x-dev-role"] ?? "");
   const isSimulation = requestedRole === "business" || requestedRole === "system_owner";
+  const configuredRole = await getAdminMemberRole(feishuUserId, feishuUserId, name);
   const role: AuthUser["role"] = !isSimulation && isSuperAdminIdentity(feishuUserId, feishuUserId, name)
     ? "admin"
     : requestedRole === "external"
       ? "external"
       : isSimulation
         ? requestedRole
-      : await isAdminMemberIdentity(feishuUserId, feishuUserId, name)
-        ? "system_owner"
-        : "business";
+        : configuredRole ?? "business";
 
   const result = await query<DbUser>(
     `INSERT INTO users (feishu_user_id, name, department, role, access_status)

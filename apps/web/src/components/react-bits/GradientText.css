@@ -1,0 +1,58 @@
+.animated-gradient-text {
+  position: relative;
+  display: inline-flex;
+  max-width: fit-content;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-weight: 900;
+  overflow: hidden;
+}
+
+.animated-gradient-text.with-border {
+  padding: 0.35rem 0.75rem;
+}
+
+.gradient-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: linear-gradient(var(--gradient-angle), var(--gradient-colors));
+  background-size: 260% 100%;
+  animation: rb-gradient-shift var(--gradient-speed) ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+.gradient-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 7px;
+  background: rgba(31, 26, 23, 0.9);
+}
+
+.animated-gradient-text .text-content {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  background-image: linear-gradient(var(--gradient-angle), var(--gradient-colors));
+  background-size: 260% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: rb-gradient-shift var(--gradient-speed) ease-in-out infinite alternate;
+}
+
+.animated-gradient-text.pause-on-hover:hover .text-content,
+.animated-gradient-text.pause-on-hover:hover .gradient-overlay {
+  animation-play-state: paused;
+}
+
+@keyframes rb-gradient-shift {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 100% 50%;
+  }
+}

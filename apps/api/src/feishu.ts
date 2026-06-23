@@ -6,6 +6,7 @@ type NotificationPayload = {
   body: string;
   submitterFeishuUserId?: string | null;
   ownerFeishuUserId?: string | null;
+  extraFeishuUserIds?: Array<string | null | undefined>;
 };
 
 type ReceiveIdType = "open_id" | "user_id" | "union_id" | "email" | "chat_id";
@@ -115,9 +116,14 @@ export class FeishuService {
       console.info("[feishu:mock-notification]", payload);
       return { ok: true, mocked: true };
     }
-    const recipients = [payload.submitterFeishuUserId, payload.ownerFeishuUserId].filter((id): id is string => Boolean(id));
+    const recipients = [
+      payload.submitterFeishuUserId,
+      payload.ownerFeishuUserId,
+      ...(payload.extraFeishuUserIds ?? [])
+    ].filter((id): id is string => Boolean(id));
+    const uniqueRecipients = [...new Set(recipients)];
     const results = [];
-    for (const receiveId of recipients) {
+    for (const receiveId of uniqueRecipients) {
       results.push(await this.sendTextMessage({
         receiveId,
         receiveIdType: config.feishu.messageReceiveIdType as ReceiveIdType,
@@ -157,6 +163,8 @@ export class FeishuService {
       return {
         accessToken: "mock-user-access-token",
         expiresIn: 7200,
+        refreshToken: "mock-refresh-token",
+        refreshExpiresIn: 2592000,
         scope: "",
         userInfo: {
           name: "彭涛",
@@ -212,8 +220,55 @@ export class FeishuService {
     return {
       accessToken: access_token,
       expiresIn: expires_in,
+      refreshToken: refresh_token ?? null,
+      refreshExpiresIn: refresh_expires_in ?? null,
       scope: scope ?? "",
       userInfo
+    };
+  }
+
+  async refreshUserAccessToken(refreshToken: string) {
+    if (!config.feishu.requireRealApi) {
+      return {
+        accessToken: "mock-user-access-token",
+        expiresIn: 7200,
+        refreshToken: "mock-refresh-token",
+        refreshExpiresIn: 2592000,
+        scope: ""
+      };
+    }
+    const appToken = await this.getAppAccessToken();
+    const response = await fetch("https://open.feishu.cn/open-apis/authen/v1/oidc/refresh_access_token", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${appToken}`,
+        "content-type": "application/json; charset=utf-8"
+      },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken
+      })
+    });
+    const data = await response.json() as {
+      code: number;
+      msg?: string;
+      data?: {
+        access_token: string;
+        expires_in: number;
+        refresh_token?: string;
+        refresh_expires_in?: number;
+        scope?: string;
+      };
+    };
+    if (!response.ok || data.code !== 0 || !data.data?.access_token) {
+      throw new Error(`Failed to refresh Feishu user token: ${data.msg ?? response.statusText}`);
+    }
+    return {
+      accessToken: data.data.access_token,
+      expiresIn: data.data.expires_in,
+      refreshToken: data.data.refresh_token ?? null,
+      refreshExpiresIn: data.data.refresh_expires_in ?? null,
+      scope: data.data.scope ?? ""
     };
   }
 
@@ -229,6 +284,66 @@ export class FeishuService {
       throw new Error(`Failed to get Feishu user info: ${data.msg ?? data.code}`);
     }
     return data.data;
+  }
+
+  async searchUsers(userAccessToken: string, input: { query: string; pageSize?: number; pageToken?: string }) {
+    if (!config.feishu.requireRealApi) {
+      return {
+        users: [
+          {
+            userId: "a10986",
+            openId: "mock-open-id",
+            name: input.query || "沈昀初",
+            department: "信息数字化部",
+            avatarUrl: ""
+          }
+        ],
+        hasMore: false,
+        pageToken: null
+      };
+    }
+    const search = new URLSearchParams({
+      query: input.query,
+      page_size: String(input.pageSize ?? 10)
+    });
+    if (input.pageToken) search.set("page_token", input.pageToken);
+    const response = await fetch(`https://open.feishu.cn/open-apis/search/v1/user?${search.toString()}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${userAccessToken}`
+      }
+    });
+    const data = await response.json() as {
+      code: number;
+      msg?: string;
+      data?: {
+        users?: Array<Record<string, unknown>>;
+        items?: Array<Record<string, unknown>>;
+        has_more?: boolean;
+        page_token?: string;
+      };
+    };
+    if (!response.ok || data.code !== 0) {
+      throw new Error(`Feishu user search failed: ${data.msg ?? response.statusText}`);
+    }
+    const users = (data.data?.users ?? data.data?.items ?? []).map((item) => ({
+      userId: String(item.user_id ?? item.userId ?? ""),
+      openId: item.open_id ? String(item.open_id) : item.openId ? String(item.openId) : null,
+      name: String(item.name ?? item.cn_name ?? item.en_name ?? item.user_name ?? ""),
+      department: Array.isArray(item.departments)
+        ? item.departments.map((department) => String((department as any).name ?? department)).filter(Boolean).join(" / ")
+        : item.department_name
+          ? String(item.department_name)
+          : item.department
+            ? String(item.department)
+            : null,
+      avatarUrl: item.avatar_url ? String(item.avatar_url) : item.avatarUrl ? String(item.avatarUrl) : null
+    })).filter((user) => user.userId && user.name);
+    return {
+      users,
+      hasMore: Boolean(data.data?.has_more),
+      pageToken: data.data?.page_token ?? null
+    };
   }
 
   private async bitableRequest<T>(path: string, options: RequestInit = {}) {
@@ -322,6 +437,7 @@ export class FeishuService {
   tableIdForType(typeKey: string) {
     if (typeKey === "demand") return config.feishu.demandTableId;
     if (typeKey === "issue") return config.feishu.issueTableId;
+    if (typeKey === "innovation_studio") return config.feishu.innovationTableId;
     if (typeKey === "system_owner") return config.feishu.systemOwnerTableId;
     return "";
   }

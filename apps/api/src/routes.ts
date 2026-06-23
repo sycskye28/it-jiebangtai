@@ -4,18 +4,31 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import AdmZip from "adm-zip";
 import { z } from "zod";
-import { createRecordSchema, updateRecordSchema, accessRequestSchema } from "@it/shared";
+import {
+  createRecordSchema,
+  updateRecordSchema,
+  accessRequestSchema,
+  innovationArticleInputSchema,
+  innovationAwardInputSchema,
+  innovationProjectInputSchema,
+  innovationStatusSchema,
+  innovationSupplementInputSchema
+} from "@it/shared";
 import { config } from "./config.js";
 import { query, withTransaction } from "./db.js";
 import { feishuService } from "./feishu.js";
 import {
   canViewRecord,
   getFieldConfigs,
+  getFeishuUserTokenState,
   getFormType,
   getFormTypes,
+  getValidFeishuUserAccessToken,
   getOwnerForSystem,
   listSystemOwners,
+  storeFeishuUserTokens,
 } from "./repositories.js";
 
 const adminOnly = (role: string) => {
@@ -164,6 +177,85 @@ function safeDownloadName(value: unknown) {
   return name.trim() || fallback;
 }
 
+function xmlText(value: string) {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'");
+}
+
+function extractDocxPreview(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+    const error = new Error("当前文件不是有效的 .docx Word 文档，请确认不是 .doc、PDF 或网页下载文件。");
+    (error as any).statusCode = 400;
+    throw error;
+  }
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(buffer);
+  } catch {
+    const error = new Error("Word 文档解析失败，请重新另存为 .docx 后再上传。");
+    (error as any).statusCode = 400;
+    throw error;
+  }
+  const documentEntry = zip.getEntry("word/document.xml");
+  if (!documentEntry) {
+    const error = new Error("Word 文档结构不完整，未找到正文内容，请重新另存为 .docx 后再上传。");
+    (error as any).statusCode = 400;
+    throw error;
+  }
+  const xml = documentEntry.getData().toString("utf8");
+  const paragraphs = xml.match(/<w:p[\s\S]*?<\/w:p>/g) ?? [];
+  return paragraphs
+    .map((paragraph) => {
+      const runs = [...paragraph.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)];
+      return runs.map((run) => xmlText(run[1] ?? "")).join("");
+    })
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function uploadMimeType(fileName: string) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if ([".jpg", ".jpeg"].includes(extension)) return "image/jpeg";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  return "application/octet-stream";
+}
+
+function extractDocxImages(buffer: Buffer) {
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(buffer);
+  } catch {
+    return [];
+  }
+  return zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory && /^word\/media\/[^/]+\.(png|jpe?g|gif|webp|svg)$/i.test(entry.entryName))
+    .map((entry, index) => {
+      const originalName = path.basename(entry.entryName);
+      const extension = path.extname(originalName).toLowerCase();
+      const storedName = `${Date.now()}-${randomUUID()}-word-image-${index + 1}${extension}`;
+      const buffer = entry.getData();
+      return {
+        name: originalName,
+        storedName,
+        mimeType: uploadMimeType(originalName),
+        size: buffer.length,
+        buffer,
+        url: `/api/uploads/${storedName}`,
+        source: "word_image"
+      };
+    });
+}
+
 function todayInChina() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -217,6 +309,7 @@ function applySubmissionAutoFields(
   }
   for (const key of submitterKeys) next[key] = user.name;
   for (const key of submittedAtKeys) next[key] = todayInChina();
+  next.submitter_user_id = user.feishuUserId;
   next.submitter_feishu_user_id = user.feishuUserId;
   return next;
 }
@@ -312,6 +405,7 @@ async function tableIdForType(typeKey: string) {
 function builtinTypeForTableId(tableId: string) {
   if (tableId === config.feishu.demandTableId) return "demand";
   if (tableId === config.feishu.issueTableId) return "issue";
+  if (tableId === config.feishu.innovationTableId) return INNOVATION_TYPE_KEY;
   return null;
 }
 
@@ -479,7 +573,19 @@ async function cleanupFeishuRecordFallback(record: any) {
   return { deletedCount: deletedIds.size, errors };
 }
 
+let feishuNotificationsDisabled = config.feishu.notificationsDisabled;
+
 async function trySendNotification(recordId: string | null, payload: Parameters<typeof feishuService.sendNotification>[0]) {
+  if (feishuNotificationsDisabled) {
+    console.info("[feishu:notification-muted]", {
+      recordId,
+      title: payload.title,
+      submitterFeishuUserId: payload.submitterFeishuUserId,
+      ownerFeishuUserId: payload.ownerFeishuUserId,
+      extraFeishuUserIds: payload.extraFeishuUserIds
+    });
+    return;
+  }
   try {
     await feishuService.sendNotification(payload);
   } catch (error) {
@@ -496,19 +602,219 @@ function normalizeManualFeishuUserId(providedUserId?: string | null) {
   return String(providedUserId ?? "").trim() || null;
 }
 
+async function searchFeishuUsersForRequest(request: any, queryParams: { query: string; pageSize: number; pageToken?: string }) {
+  let token = await getValidFeishuUserAccessToken(request.user.id);
+  if (!token) {
+    const tokenState = await getFeishuUserTokenState(request.user.id);
+    const refreshTokenValid = tokenState?.feishu_user_refresh_token
+      && tokenState.feishu_user_refresh_expires_at
+      && tokenState.feishu_user_refresh_expires_at > new Date();
+    if (refreshTokenValid) {
+      const refreshed = await feishuService.refreshUserAccessToken(tokenState.feishu_user_refresh_token!);
+      await storeFeishuUserTokens({
+        feishuUserId: request.user.feishuUserId,
+        accessToken: refreshed.accessToken,
+        expiresInSeconds: refreshed.expiresIn,
+        refreshToken: refreshed.refreshToken,
+        refreshExpiresInSeconds: refreshed.refreshExpiresIn
+      });
+      token = refreshed.accessToken;
+    }
+  }
+  if (!token) {
+    throw Object.assign(new Error("missing_user_token"), { statusCode: 400 });
+  }
+  return feishuService.searchUsers(token, {
+    query: queryParams.query,
+    pageSize: queryParams.pageSize,
+    pageToken: queryParams.pageToken
+  });
+}
+
+function isSuperAdminIdentityValue(feishuUserId?: string | null, employeeNo?: string | null, name?: string | null) {
+  const normalizedUserId = String(feishuUserId ?? "").trim().toLowerCase();
+  const normalizedEmployeeNo = String(employeeNo ?? "").trim().toLowerCase();
+  return normalizedUserId === "a10986" || normalizedEmployeeNo === "a10986" || String(name ?? "").trim() === "沈昀初";
+}
+
 function toAdminMember(row: any) {
   return {
     id: row.id,
     name: row.name,
     feishuUserId: row.feishu_user_id,
     employeeNo: row.employee_no,
+    role: row.role ?? "system_owner",
     note: row.note,
     enabled: row.enabled
   };
 }
 
+const INNOVATION_TYPE_KEY = "innovation_studio";
+const INNOVATION_SYSTEM_NAME = "数字化创新工作室";
+const INNOVATION_DEFAULT_STATUS = "待评审";
+const INNOVATION_REJECTED_STATUS = "暂未入选（感谢你的创新提案）";
+const innovationSupplementKeys = ["leader_name", "leader_user_id", "participants", "participants_user_ids", "workshop_resources", "expected_cost", "expected_cycle"] as const;
+
+function stringValue(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizedNumberText(value: unknown) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  return String(value).trim();
+}
+
+function canManageInnovation(role: string) {
+  return role === "admin" || role === "system_owner";
+}
+
+function isInnovationRecord(record: any) {
+  return record?.type_key === INNOVATION_TYPE_KEY;
+}
+
+function canSupplementInnovation(user: any, record: any) {
+  if (canManageInnovation(user.role)) return true;
+  return Boolean(
+    record.submitter_user_id === user.id
+      || record.submitter_name === user.name
+      || (record.values ?? {}).submitter_feishu_user_id === user.feishuUserId
+  );
+}
+
+function toInnovationAward(row: any) {
+  return {
+    id: row.id,
+    recordId: row.record_id,
+    awardName: row.award_name,
+    awardType: row.award_type ?? null,
+    reason: row.reason ?? null,
+    displayOrder: Number(row.display_order ?? 0),
+    awardedByName: row.awarded_by_name,
+    awardedAt: row.awarded_at
+  };
+}
+
+function toInnovationArticle(row: any) {
+  return {
+    id: row.id,
+    title: row.title,
+    summary: row.summary ?? "",
+    body: row.body ?? "",
+    coverImageUrl: row.cover_image_url ?? null,
+    attachments: row.attachments ?? [],
+    status: row.status,
+    authorName: row.author_name,
+    publishedAt: row.published_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function awardsByRecordIds(recordIds: string[]) {
+  if (!recordIds.length) return new Map<string, ReturnType<typeof toInnovationAward>[]>();
+  const awardRows = await query<any>(
+    `SELECT *
+       FROM innovation_awards
+      WHERE record_id = ANY($1::uuid[])
+      ORDER BY display_order, awarded_at DESC`,
+    [recordIds]
+  );
+  const grouped = new Map<string, ReturnType<typeof toInnovationAward>[]>();
+  for (const row of awardRows.rows) {
+    const list = grouped.get(row.record_id) ?? [];
+    list.push(toInnovationAward(row));
+    grouped.set(row.record_id, list);
+  }
+  return grouped;
+}
+
+async function toInnovationProject(row: any, options: { includeTimeline?: boolean } = {}) {
+  const awards = await awardsByRecordIds([row.id]);
+  let timeline: any[] | undefined;
+  if (options.includeTimeline) {
+    const timelineRows = await query<any>(
+      `SELECT id, event_type, title, body, actor_name, created_at
+         FROM timeline_events
+        WHERE record_id=$1
+        ORDER BY created_at`,
+      [row.id]
+    );
+    timeline = timelineRows.rows.map((item) => ({
+      id: item.id,
+      eventType: item.event_type,
+      title: item.title,
+      body: item.body,
+      actorName: item.actor_name,
+      createdAt: item.created_at
+    }));
+  }
+  const summary = summarizeRecord(row);
+  return {
+    id: summary.id,
+    recordNo: summary.recordNo,
+    title: summary.title,
+    status: summary.status,
+    submitterUserId: summary.submitterUserId,
+    submitterFeishuUserId: summary.submitterFeishuUserId,
+    submitterName: summary.submitterName,
+    ownerName: summary.ownerName,
+    values: row.values ?? {},
+    awards: awards.get(row.id) ?? [],
+    timeline,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt
+  };
+}
+
+function mapInnovationInputToValues(input: z.infer<typeof innovationProjectInputSchema>) {
+  return {
+    project_theme: stringValue(input.projectTheme),
+    project_description: stringValue(input.projectDescription),
+    innovation_kind: input.innovationKind,
+    leader_name: stringValue(input.leaderName),
+    leader_user_id: normalizeManualFeishuUserId(input.leaderUserId),
+    estimated_demand_cost: normalizedNumberText(input.estimatedDemandCost),
+    studio_scope: INNOVATION_SYSTEM_NAME
+  };
+}
+
+function innovationNotifyUserIds(values: Record<string, unknown>) {
+  const leaderUserId = normalizeManualFeishuUserId(String(values.leader_user_id ?? ""));
+  return [leaderUserId, ...config.feishu.innovationNotifyUserIds];
+}
+
+function mapInnovationSupplementToValues(input: z.infer<typeof innovationSupplementInputSchema>, allowStatus: boolean) {
+  const values: Record<string, unknown> = {};
+  if (input.leaderName !== undefined) values.leader_name = stringValue(input.leaderName);
+  if (input.leaderUserId !== undefined) values.leader_user_id = normalizeManualFeishuUserId(input.leaderUserId);
+  if (input.participants !== undefined) values.participants = stringValue(input.participants);
+  if (input.participantsUserIds !== undefined) {
+    values.participants_user_ids = (input.participantsUserIds ?? [])
+      .map((id) => normalizeManualFeishuUserId(id))
+      .filter(Boolean);
+  }
+  if (input.workshopResources !== undefined) values.workshop_resources = stringValue(input.workshopResources);
+  if (input.expectedCost !== undefined) values.expected_cost = normalizedNumberText(input.expectedCost);
+  if (input.expectedCycle !== undefined) values.expected_cycle = stringValue(input.expectedCycle);
+  if (allowStatus && input.status !== undefined) values.status = input.status;
+  return values;
+}
+
 export async function registerRoutes(app: FastifyInstance) {
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/api/admin/feishu/notifications", async (request) => {
+    adminOnly(request.user.role);
+    return { disabled: feishuNotificationsDisabled };
+  });
+
+  app.patch("/api/admin/feishu/notifications", async (request) => {
+    adminOnly(request.user.role);
+    const body = z.object({ disabled: z.boolean() }).parse(request.body);
+    feishuNotificationsDisabled = body.disabled;
+    return { disabled: feishuNotificationsDisabled };
+  });
 
   app.get("/api/uploads/:fileName", async (request, reply) => {
     const params = z.object({ fileName: z.string().min(1) }).parse(request.params);
@@ -519,6 +825,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const safeName = path.basename(params.fileName);
     const filePath = path.join(config.uploadDir, safeName);
     await fsp.access(filePath);
+    reply.header("content-type", uploadMimeType(safeName));
     reply.header(
       "content-disposition",
       `${queryParams.disposition === "attachment" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(safeDownloadName(queryParams.name ?? safeName))}`
@@ -553,11 +860,8 @@ export async function registerRoutes(app: FastifyInstance) {
     const safeOriginalName = path.basename(file.filename || "attachment").replace(/[^\w.\-\u4e00-\u9fa5]/g, "_");
     const storedName = `${Date.now()}-${randomUUID()}${extension}`;
     const filePath = path.join(config.uploadDir, storedName);
-    const chunks: Buffer[] = [];
-    for await (const chunk of file.file) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    const buffer = Buffer.concat(chunks);
+    const buffer = await file.toBuffer();
+    if ((file as any).truncated) return app.httpErrors.badRequest("上传文件过大或传输不完整，请重新上传。");
     await fsp.writeFile(filePath, buffer);
     let feishu: { fileToken?: string; error?: string } = {};
     try {
@@ -594,14 +898,497 @@ export async function registerRoutes(app: FastifyInstance) {
 
   app.get("/api/system-owners", async () => listSystemOwners());
 
+  app.get("/api/feishu/users/search", async (request) => {
+    const queryParams = z.object({
+      query: z.string().trim().min(1),
+      pageSize: z.coerce.number().int().min(1).max(20).default(10),
+      pageToken: z.string().optional()
+    }).parse(request.query);
+    return searchFeishuUsersForRequest(request, queryParams);
+  });
+
+  app.get("/api/innovation/projects", async () => {
+    const result = await query<any>(
+      `SELECT *
+         FROM records
+        WHERE type_key=$1
+        ORDER BY updated_at DESC
+        LIMIT 200`,
+      [INNOVATION_TYPE_KEY]
+    );
+    const groupedAwards = await awardsByRecordIds(result.rows.map((row) => row.id));
+    return result.rows.map((row) => {
+      const summary = summarizeRecord(row);
+      return {
+        id: summary.id,
+        recordNo: summary.recordNo,
+        title: summary.title,
+        status: summary.status,
+        submitterUserId: summary.submitterUserId,
+        submitterFeishuUserId: summary.submitterFeishuUserId,
+        submitterName: summary.submitterName,
+        ownerName: summary.ownerName,
+        values: row.values ?? {},
+        awards: groupedAwards.get(row.id) ?? [],
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt
+      };
+    });
+  });
+
+  app.get("/api/innovation/projects/:id", async (request) => {
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const result = await query<any>("SELECT * FROM records WHERE id=$1 AND type_key=$2", [params.id, INNOVATION_TYPE_KEY]);
+    if (!result.rows[0]) return app.httpErrors.notFound("Innovation project not found.");
+    return toInnovationProject(result.rows[0], { includeTimeline: true });
+  });
+
+  app.post("/api/innovation/projects", async (request) => {
+    const body = innovationProjectInputSchema.parse(request.body);
+    const inputValues = mapInnovationInputToValues(body);
+    if (body.innovationKind === "创新需求" && (!inputValues.leader_name || !inputValues.leader_user_id || !inputValues.estimated_demand_cost)) {
+      return app.httpErrors.badRequest("创新需求需要选择牵头人并填写预计需求费用。");
+    }
+
+    const created = await withTransaction(async (client) => {
+      const formType = await getFormType(INNOVATION_TYPE_KEY, client);
+      if (!formType) throw app.httpErrors.badRequest("创新工作室表单类型未初始化，请先运行数据库迁移。");
+      const fields = await getFieldConfigs(INNOVATION_TYPE_KEY);
+      const values = applySubmissionAutoFields(inputValues, fields, formType, request.user);
+      const owner = await getOwnerForSystem(INNOVATION_SYSTEM_NAME, client);
+      const recordNo = await generateRecordNo(client, INNOVATION_TYPE_KEY, formType.name);
+      const mergedValues: Record<string, unknown> = {
+        ...values,
+        record_no: recordNo,
+        status: INNOVATION_DEFAULT_STATUS,
+        studio_scope: INNOVATION_SYSTEM_NAME,
+        system_owner: owner.ownerName
+      };
+      const result = await client.query<any>(
+        `INSERT INTO records (record_no, type_key, title, system_name, status, priority, submitter_user_id,
+                              submitter_name, owner_name, owner_feishu_user_id, values)
+         VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10)
+         RETURNING *`,
+        [
+          recordNo,
+          INNOVATION_TYPE_KEY,
+          String(mergedValues.project_theme ?? ""),
+          INNOVATION_SYSTEM_NAME,
+          INNOVATION_DEFAULT_STATUS,
+          request.user.id,
+          request.user.name,
+          owner.ownerName,
+          owner.ownerFeishuUserId,
+          JSON.stringify(mergedValues)
+        ]
+      );
+      const record = result.rows[0];
+      await client.query(
+        `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
+         VALUES ($1, 'record_created', '创新项目已提交', $2, $3, $4)`,
+        [
+          record.id,
+          submissionTimelineBody({
+            submitterName: request.user.name,
+            submittedAt: record.created_at,
+            ownerName: owner.ownerName,
+            extra: `类型：${body.innovationKind}`
+          }),
+          request.user.id,
+          request.user.name
+        ]
+      );
+      await client.query(
+        `INSERT INTO audit_logs (record_id, entity_type, entity_id, action, new_value, actor_user_id, actor_name)
+         VALUES ($1, 'innovation_project', $2, 'create', $3, $4, $5)`,
+        [record.id, record.id, JSON.stringify(mergedValues), request.user.id, request.user.name]
+      );
+      return record;
+    });
+
+    await trySendNotification(created.id, {
+      eventKey: "record_created",
+      title: `新创新项目：${created.title}`,
+      body: `状态：${created.status}\n负责人：${created.owner_name ?? "未分派"}`,
+      submitterFeishuUserId: request.user.feishuUserId,
+      ownerFeishuUserId: created.owner_feishu_user_id,
+      extraFeishuUserIds: innovationNotifyUserIds(created.values ?? {})
+    });
+    await tryCreateFeishuRecord(created);
+    return toInnovationProject(created, { includeTimeline: true });
+  });
+
+  app.patch("/api/innovation/projects/:id/supplement", async (request) => {
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = innovationSupplementInputSchema.parse(request.body);
+    const allowStatus = canManageInnovation(request.user.role);
+    if (body.status && !allowStatus) return app.httpErrors.forbidden("Only IT administrators can update innovation status.");
+
+    const updated = await withTransaction(async (client) => {
+      const currentResult = await client.query<any>("SELECT * FROM records WHERE id=$1 AND type_key=$2 FOR UPDATE", [params.id, INNOVATION_TYPE_KEY]);
+      const current = currentResult.rows[0];
+      if (!current) throw app.httpErrors.notFound("Innovation project not found.");
+      if (!canSupplementInnovation(request.user, current)) throw app.httpErrors.forbidden("No access to supplement this innovation project.");
+
+      const currentValues = current.values ?? {};
+      const incoming = mapInnovationSupplementToValues(body, allowStatus);
+      const businessIncoming = allowStatus ? incoming : Object.fromEntries(Object.entries(incoming).filter(([key]) => innovationSupplementKeys.includes(key as any)));
+      const nextValues = { ...currentValues, ...businessIncoming };
+      const nextStatus = allowStatus && body.status ? body.status : current.status;
+      nextValues.status = nextStatus;
+      const result = await client.query<any>(
+        `UPDATE records
+            SET status=$2,
+                values=$3,
+                updated_at=now()
+          WHERE id=$1
+          RETURNING *`,
+        [params.id, nextStatus, JSON.stringify(nextValues)]
+      );
+
+      for (const [fieldKey, newValue] of Object.entries(businessIncoming)) {
+        await client.query(
+          `INSERT INTO audit_logs (record_id, entity_type, entity_id, action, field_key, old_value, new_value, actor_user_id, actor_name)
+           VALUES ($1, 'innovation_project', $2, 'update', $3, $4, $5, $6, $7)`,
+          [
+            params.id,
+            params.id,
+            fieldKey,
+            JSON.stringify(currentValues[fieldKey] ?? null),
+            JSON.stringify(newValue ?? null),
+            request.user.id,
+            request.user.name
+          ]
+        );
+      }
+
+      if (nextStatus !== current.status) {
+        await client.query(
+          `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
+           VALUES ($1, 'status_changed', '创新项目状态已更新', $2, $3, $4)`,
+          [params.id, `${request.user.name} 在 ${dateTimeInChina()} 将状态从「${current.status}」修改为「${nextStatus}」`, request.user.id, request.user.name]
+        );
+      } else if (Object.keys(businessIncoming).length) {
+        await client.query(
+          `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
+           VALUES ($1, 'innovation_supplemented', '创新项目信息已补充', $2, $3, $4)`,
+          [params.id, `${request.user.name} 在 ${dateTimeInChina()} 补充了协同信息`, request.user.id, request.user.name]
+        );
+      }
+      return result.rows[0];
+    });
+
+    await tryUpdateFeishuRecord(updated);
+    await trySendNotification(updated.id, {
+      eventKey: updated.status !== INNOVATION_DEFAULT_STATUS ? "status_changed" : "need_more_info",
+      title: updated.status !== INNOVATION_DEFAULT_STATUS ? `创新项目状态更新：${updated.title}` : `创新项目信息更新：${updated.title}`,
+      body: `状态：${updated.status}\n负责人：${updated.owner_name ?? "未分派"}`,
+      submitterFeishuUserId: updated.values?.submitter_feishu_user_id ?? null,
+      ownerFeishuUserId: updated.owner_feishu_user_id,
+      extraFeishuUserIds: innovationNotifyUserIds(updated.values ?? {})
+    });
+    return toInnovationProject(updated, { includeTimeline: true });
+  });
+
+  app.delete("/api/admin/innovation/projects/:id", async (request) => {
+    adminOnly(request.user.role);
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const currentResult = await query<any>("SELECT * FROM records WHERE id=$1 AND type_key=$2", [params.id, INNOVATION_TYPE_KEY]);
+    const current = currentResult.rows[0];
+    if (!current) return app.httpErrors.notFound("Innovation project not found.");
+    try {
+      if (current.feishu_record_id) await deleteFeishuRecord(current.type_key, current.feishu_record_id);
+    } catch (error) {
+      await query(
+        `INSERT INTO audit_logs (record_id, entity_type, entity_id, action, old_value, actor_user_id, actor_name)
+         VALUES ($1, 'innovation_project', $2, 'feishu_delete_warning', $3, $4, $5)`,
+        [params.id, params.id, JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), request.user.id, request.user.name]
+      );
+    }
+    const deleted = await withTransaction(async (client) => {
+      await client.query("DELETE FROM innovation_awards WHERE record_id=$1", [params.id]);
+      const result = await client.query<any>("DELETE FROM records WHERE id=$1 AND type_key=$2 RETURNING *", [params.id, INNOVATION_TYPE_KEY]);
+      await client.query(
+        `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, actor_user_id, actor_name)
+         VALUES ('innovation_project', $1, 'delete', $2, $3, $4)`,
+        [params.id, JSON.stringify(current), request.user.id, request.user.name]
+      );
+      return result.rows[0];
+    });
+    return { ok: true, id: deleted.id, recordNo: deleted.record_no ?? null };
+  });
+
+  app.get("/api/innovation/awards", async () => {
+    const result = await query<any>(
+      `SELECT awards.*, records.title, records.record_no, records.status, records.submitter_name, records.values, records.created_at AS record_created_at, records.updated_at AS record_updated_at
+         FROM innovation_awards awards
+         JOIN records ON records.id = awards.record_id
+        WHERE records.type_key=$1
+        ORDER BY awards.display_order, awards.awarded_at DESC`,
+      [INNOVATION_TYPE_KEY]
+    );
+    return result.rows.map((row) => ({
+      ...toInnovationAward(row),
+      projectTitle: row.title,
+      recordNo: row.record_no,
+      projectStatus: row.status,
+      submitterName: row.submitter_name,
+      projectValues: row.values ?? {}
+    }));
+  });
+
+  app.post("/api/admin/innovation/awards", async (request) => {
+    systemWorkerOnly(request.user.role);
+    const parsed = innovationAwardInputSchema.safeParse(request.body);
+    if (!parsed.success) return app.httpErrors.badRequest("请选择至少一个奖项。");
+    const body = parsed.data;
+    const record = await query<any>("SELECT * FROM records WHERE id=$1 AND type_key=$2", [body.recordId, INNOVATION_TYPE_KEY]);
+    if (!record.rows[0]) return app.httpErrors.notFound("Innovation project not found.");
+    const existing = await query<any>("SELECT award_name FROM innovation_awards WHERE record_id=$1", [body.recordId]);
+    const existingAwardNames = new Set(
+      existing.rows
+        .flatMap((row) => String(row.award_name ?? "").split("、"))
+        .map((name) => name.trim())
+        .filter(Boolean)
+    );
+    const duplicated = body.awardNames.filter((name) => existingAwardNames.has(name));
+    if (duplicated.length) {
+      return app.httpErrors.badRequest(`${record.rows[0].title} 项目已是 ${duplicated.join("、")}，无需重复评奖。`);
+    }
+    const awardName = body.awardNames.join("、");
+    const result = await query<any>(
+      `INSERT INTO innovation_awards (record_id, award_name, award_type, reason, display_order, awarded_by_user_id, awarded_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING *`,
+      [body.recordId, awardName, null, body.reason ?? null, body.displayOrder ?? 0, request.user.id, request.user.name]
+    );
+    await query(
+      `INSERT INTO timeline_events (record_id, event_type, title, body, actor_user_id, actor_name)
+       VALUES ($1, 'innovation_awarded', '创新项目已评奖', $2, $3, $4)`,
+      [body.recordId, `${request.user.name} 授予「${awardName}」${body.reason ? `：${body.reason}` : ""}`, request.user.id, request.user.name]
+    );
+    await query(
+      `INSERT INTO audit_logs (record_id, entity_type, entity_id, action, new_value, actor_user_id, actor_name)
+       VALUES ($1, 'innovation_award', $2, 'create', $3, $4, $5)`,
+      [body.recordId, result.rows[0].id, JSON.stringify(result.rows[0]), request.user.id, request.user.name]
+    );
+    await trySendNotification(body.recordId, {
+      eventKey: "status_changed",
+      title: `创新项目获奖：${record.rows[0].title}`,
+      body: `奖项：${awardName}${body.reason ? `\n理由：${body.reason}` : ""}`,
+      submitterFeishuUserId: record.rows[0].values?.submitter_feishu_user_id ?? null,
+      ownerFeishuUserId: record.rows[0].owner_feishu_user_id,
+      extraFeishuUserIds: innovationNotifyUserIds(record.rows[0].values ?? {})
+    });
+    return toInnovationAward(result.rows[0]);
+  });
+
+  app.get("/api/innovation/articles", async (request) => {
+    const queryParams = z.object({ includeDrafts: z.coerce.boolean().optional() }).parse(request.query);
+    const includeDrafts = queryParams.includeDrafts && canManageInnovation(request.user.role);
+    const result = await query<any>(
+      `SELECT *
+         FROM innovation_articles
+        ${includeDrafts ? "" : "WHERE status='published'"}
+        ORDER BY COALESCE(published_at, created_at) DESC, created_at DESC
+        LIMIT 100`
+    );
+    return result.rows.map(toInnovationArticle);
+  });
+
+  app.get("/api/innovation/articles/:id", async (request) => {
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const result = await query<any>("SELECT * FROM innovation_articles WHERE id=$1", [params.id]);
+    const article = result.rows[0];
+    if (!article) return app.httpErrors.notFound("Article not found.");
+    if (article.status !== "published" && !canManageInnovation(request.user.role)) {
+      return app.httpErrors.notFound("Article not found.");
+    }
+    return toInnovationArticle(article);
+  });
+
+  app.post("/api/admin/innovation/articles/word", async (request) => {
+    systemWorkerOnly(request.user.role);
+    const file = await request.file();
+    if (!file) return app.httpErrors.badRequest("请上传 Word 文档。");
+    const extension = path.extname(file.filename || "").toLowerCase();
+    if (![".docx"].includes(extension)) {
+      return app.httpErrors.badRequest("当前预览支持 .docx Word 文档，请上传 docx 文件。");
+    }
+    await fsp.mkdir(config.uploadDir, { recursive: true });
+    const safeOriginalName = path.basename(file.filename || "innovation-note.docx").replace(/[^\w.\-\u4e00-\u9fa5]/g, "_");
+    const storedName = `${Date.now()}-${randomUUID()}${extension}`;
+    const filePath = path.join(config.uploadDir, storedName);
+    const buffer = await file.toBuffer();
+    if ((file as any).truncated) return app.httpErrors.badRequest("上传文件过大或传输不完整，请重新上传。");
+    if (!buffer.length) return app.httpErrors.badRequest("上传文件为空，请重新选择 Word 文档。");
+    let previewText = "";
+    try {
+      previewText = extractDocxPreview(buffer);
+    } catch (error) {
+      return app.httpErrors.badRequest(error instanceof Error ? error.message : "Word 文档解析失败，请重新上传 .docx 文件。");
+    }
+    const docxImages = extractDocxImages(buffer);
+    await fsp.writeFile(filePath, buffer);
+    for (const image of docxImages) {
+      await fsp.writeFile(path.join(config.uploadDir, image.storedName), image.buffer);
+    }
+    let feishu: { fileToken?: string; error?: string } = {};
+    try {
+      const uploaded = await feishuService.uploadBitableAttachment({
+        buffer,
+        fileName: safeOriginalName,
+        mimeType: file.mimetype || "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      });
+      feishu = { fileToken: uploaded.fileToken };
+    } catch (error) {
+      feishu = { error: error instanceof Error ? error.message : "飞书附件上传失败" };
+    }
+    const title = safeOriginalName.replace(/\.docx$/i, "");
+    const attachment = {
+      name: safeOriginalName,
+      storedName,
+      mimeType: file.mimetype || "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      size: buffer.length,
+      url: `/api/uploads/${storedName}`,
+      fileToken: feishu.fileToken,
+      feishuError: feishu.error
+    };
+    const imageAttachments = docxImages.map(({ buffer: _buffer, ...image }) => image);
+    const result = await query<any>(
+      `INSERT INTO innovation_articles (title, summary, body, cover_image_url, attachments, status, author_user_id, author_name, published_at)
+       VALUES ($1,$2,$3,$4,$5,'published',$6,$7,now())
+       RETURNING *`,
+      [
+        title,
+        previewText.split(/\n/).find(Boolean)?.slice(0, 120) ?? "Word 文档学习心得",
+        previewText || "该 Word 文档暂未提取到可预览正文，请下载原文档查看。",
+        imageAttachments[0]?.url ?? null,
+        JSON.stringify([attachment, ...imageAttachments]),
+        request.user.id,
+        request.user.name
+      ]
+    );
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
+       VALUES ('innovation_article', $1, 'upload_word', $2, $3, $4)`,
+      [result.rows[0].id, JSON.stringify({ article: result.rows[0], attachment, imageCount: imageAttachments.length }), request.user.id, request.user.name]
+    );
+    return toInnovationArticle(result.rows[0]);
+  });
+
+  app.post("/api/admin/innovation/articles", async (request) => {
+    systemWorkerOnly(request.user.role);
+    const body = innovationArticleInputSchema.parse(request.body);
+    const publishedAt = body.status === "published" ? new Date() : null;
+    const result = await query<any>(
+      `INSERT INTO innovation_articles (title, summary, body, cover_image_url, attachments, status, author_user_id, author_name, published_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *`,
+      [
+        body.title,
+        body.summary ?? "",
+        body.body ?? "",
+        body.coverImageUrl ?? null,
+        JSON.stringify(body.attachments ?? []),
+        body.status,
+        request.user.id,
+        request.user.name,
+        publishedAt
+      ]
+    );
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
+       VALUES ('innovation_article', $1, 'create', $2, $3, $4)`,
+      [result.rows[0].id, JSON.stringify(result.rows[0]), request.user.id, request.user.name]
+    );
+    return toInnovationArticle(result.rows[0]);
+  });
+
+  app.patch("/api/admin/innovation/articles/:id", async (request) => {
+    systemWorkerOnly(request.user.role);
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = innovationArticleInputSchema.partial().parse(request.body);
+    const current = await query<any>("SELECT * FROM innovation_articles WHERE id=$1", [params.id]);
+    if (!current.rows[0]) return app.httpErrors.notFound("Article not found.");
+    const next = { ...current.rows[0] };
+    if (body.title !== undefined) next.title = body.title;
+    if (body.summary !== undefined) next.summary = body.summary;
+    if (body.body !== undefined) next.body = body.body;
+    if (body.coverImageUrl !== undefined) next.cover_image_url = body.coverImageUrl;
+    if (body.attachments !== undefined) next.attachments = body.attachments;
+    if (body.status !== undefined) {
+      next.status = body.status;
+      if (body.status === "published" && !next.published_at) next.published_at = new Date();
+      if (body.status !== "published") next.published_at = null;
+    }
+    const result = await query<any>(
+      `UPDATE innovation_articles
+          SET title=$2,
+              summary=$3,
+              body=$4,
+              cover_image_url=$5,
+              attachments=$6,
+              status=$7,
+              published_at=$8,
+              updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+      [
+        params.id,
+        next.title,
+        next.summary,
+        next.body,
+        next.cover_image_url,
+        JSON.stringify(next.attachments ?? []),
+        next.status,
+        next.published_at
+      ]
+    );
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, new_value, actor_user_id, actor_name)
+       VALUES ('innovation_article', $1, 'update', $2, $3, $4, $5)`,
+      [params.id, JSON.stringify(current.rows[0]), JSON.stringify(result.rows[0]), request.user.id, request.user.name]
+    );
+    return toInnovationArticle(result.rows[0]);
+  });
+
+  app.delete("/api/admin/innovation/articles/:id", async (request) => {
+    adminOnly(request.user.role);
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    const deleted = await query<any>(
+      `DELETE FROM innovation_articles
+        WHERE id=$1
+        RETURNING *`,
+      [params.id]
+    );
+    if (!deleted.rows[0]) return app.httpErrors.notFound("Article not found.");
+    await query(
+      `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, actor_user_id, actor_name)
+       VALUES ('innovation_article', $1, 'delete', $2, $3, $4)`,
+      [params.id, JSON.stringify(deleted.rows[0]), request.user.id, request.user.name]
+    );
+    return { ok: true, id: params.id };
+  });
+
   app.get("/api/admin/admin-members", async (request) => {
     adminOnly(request.user.role);
     const result = await query<any>(
-      `SELECT id, name, feishu_user_id, employee_no, note, enabled
+      `SELECT id, name, feishu_user_id, employee_no, role, note, enabled
          FROM admin_members
-        ORDER BY enabled DESC, name`
+        ORDER BY enabled DESC, role DESC, name`
     );
     return result.rows.map(toAdminMember);
+  });
+
+  app.get("/api/admin/feishu/users/search", async (request) => {
+    adminOnly(request.user.role);
+    const queryParams = z.object({
+      query: z.string().trim().min(1),
+      pageSize: z.coerce.number().int().min(1).max(20).default(10),
+      pageToken: z.string().optional()
+    }).parse(request.query);
+    return searchFeishuUsersForRequest(request, queryParams);
   });
 
   app.get("/api/admin/config/export", async (request, reply) => {
@@ -741,6 +1528,8 @@ export async function registerRoutes(app: FastifyInstance) {
       for (const row of body.backup.adminMembers) {
         const name = String(row.name ?? "").trim();
         const feishuUserId = row.feishu_user_id ? String(row.feishu_user_id) : null;
+        const employeeNo = row.employee_no ? String(row.employee_no) : feishuUserId;
+        const memberRole = row.role === "admin" || isSuperAdminIdentityValue(feishuUserId, employeeNo, name) ? "admin" : "system_owner";
         if (!name) continue;
         const existing = feishuUserId
           ? await client.query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
@@ -751,27 +1540,30 @@ export async function registerRoutes(app: FastifyInstance) {
                 SET name=$2,
                     feishu_user_id=$3,
                     employee_no=$4,
-                    note=$5,
-                    enabled=$6,
+                    role=$5,
+                    note=$6,
+                    enabled=$7,
                     updated_at=now()
               WHERE id=$1`,
             [
               existing.rows[0].id,
               name,
               feishuUserId,
-              row.employee_no ? String(row.employee_no) : feishuUserId,
+              employeeNo,
+              memberRole,
               row.note ? String(row.note) : null,
               row.enabled !== false
             ]
           );
         } else {
           await client.query(
-            `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
-             VALUES ($1,$2,$3,$4,$5)`,
+            `INSERT INTO admin_members (name, feishu_user_id, employee_no, role, note, enabled)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
             [
               name,
               feishuUserId,
-              row.employee_no ? String(row.employee_no) : feishuUserId,
+              employeeNo,
+              memberRole,
               row.note ? String(row.note) : null,
               row.enabled !== false
             ]
@@ -817,11 +1609,13 @@ export async function registerRoutes(app: FastifyInstance) {
       name: z.string().min(1),
       feishuUserId: z.string().nullable().optional(),
       employeeNo: z.string().nullable().optional(),
+      role: z.enum(["system_owner", "admin"]).default("system_owner"),
       note: z.string().nullable().optional(),
       enabled: z.boolean().default(true)
     }).parse(request.body);
     const feishuUserId = normalizeManualFeishuUserId(body.feishuUserId);
     const employeeNo = body.employeeNo?.trim() || feishuUserId || null;
+    const memberRole = isSuperAdminIdentityValue(feishuUserId, employeeNo, body.name) ? "admin" : body.role;
     const existing = feishuUserId
       ? await query<any>("SELECT id FROM admin_members WHERE lower(feishu_user_id)=lower($1) LIMIT 1", [feishuUserId])
       : { rows: [] };
@@ -830,18 +1624,19 @@ export async function registerRoutes(app: FastifyInstance) {
         `UPDATE admin_members
             SET name=$2,
                 employee_no=$3,
-                note=$4,
-                enabled=$5,
+                role=$4,
+                note=$5,
+                enabled=$6,
                 updated_at=now()
           WHERE id=$1
           RETURNING *`,
-        [existing.rows[0].id, body.name, employeeNo, body.note ?? null, body.enabled]
+        [existing.rows[0].id, body.name, employeeNo, memberRole, body.note ?? null, body.enabled]
       )
       : await query<any>(
-        `INSERT INTO admin_members (name, feishu_user_id, employee_no, note, enabled)
-         VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO admin_members (name, feishu_user_id, employee_no, role, note, enabled)
+         VALUES ($1,$2,$3,$4,$5,$6)
          RETURNING *`,
-        [body.name, feishuUserId, employeeNo, body.note ?? null, body.enabled]
+        [body.name, feishuUserId, employeeNo, memberRole, body.note ?? null, body.enabled]
       );
     await query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, new_value, actor_user_id, actor_name)
@@ -858,6 +1653,7 @@ export async function registerRoutes(app: FastifyInstance) {
       name: z.string().min(1).optional(),
       feishuUserId: z.string().nullable().optional(),
       employeeNo: z.string().nullable().optional(),
+      role: z.enum(["system_owner", "admin"]).optional(),
       note: z.string().nullable().optional(),
       enabled: z.boolean().optional()
     }).parse(request.body);
@@ -867,6 +1663,8 @@ export async function registerRoutes(app: FastifyInstance) {
     if (body.name !== undefined) next.name = body.name;
     if (body.feishuUserId !== undefined) next.feishu_user_id = normalizeManualFeishuUserId(body.feishuUserId);
     if (body.employeeNo !== undefined) next.employee_no = body.employeeNo?.trim() || next.feishu_user_id || null;
+    if (body.role !== undefined) next.role = body.role;
+    if (isSuperAdminIdentityValue(next.feishu_user_id, next.employee_no, next.name)) next.role = "admin";
     if (body.note !== undefined) next.note = body.note;
     if (body.enabled !== undefined) next.enabled = body.enabled;
     const result = await query<any>(
@@ -874,12 +1672,13 @@ export async function registerRoutes(app: FastifyInstance) {
           SET name=$2,
               feishu_user_id=$3,
               employee_no=$4,
-              note=$5,
-              enabled=$6,
+              role=$5,
+              note=$6,
+              enabled=$7,
               updated_at=now()
         WHERE id=$1
         RETURNING *`,
-      [params.id, next.name, next.feishu_user_id, next.employee_no, next.note, next.enabled]
+      [params.id, next.name, next.feishu_user_id, next.employee_no, next.role, next.note, next.enabled]
     );
     await query(
       `INSERT INTO audit_logs (entity_type, entity_id, action, old_value, new_value, actor_user_id, actor_name)
@@ -1327,8 +2126,12 @@ export async function registerRoutes(app: FastifyInstance) {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (queryParams.typeKey) {
+      if (queryParams.typeKey === INNOVATION_TYPE_KEY) return [];
       params.push(queryParams.typeKey);
       conditions.push(`type_key = $${params.length}`);
+    } else {
+      params.push(INNOVATION_TYPE_KEY);
+      conditions.push(`type_key <> $${params.length}`);
     }
     if (queryParams.status) {
       params.push(queryParams.status);
@@ -1351,6 +2154,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const recordResult = await query<any>("SELECT * FROM records WHERE id = $1", [params.id]);
     const record = recordResult.rows[0];
     if (!record) return app.httpErrors.notFound("Record not found.");
+    if (isInnovationRecord(record)) return app.httpErrors.notFound("Innovation records are only available in Innovation Studio.");
     if (!canViewRecord(request.user, record)) return app.httpErrors.forbidden("No access to this record.");
 
     const [comments, timeline, auditLogs] = await Promise.all([
@@ -1389,6 +2193,9 @@ export async function registerRoutes(app: FastifyInstance) {
 
   app.post("/api/records/:typeKey", async (request) => {
     const params = z.object({ typeKey: z.string() }).parse(request.params);
+    if (params.typeKey === INNOVATION_TYPE_KEY) {
+      return app.httpErrors.badRequest("创新工作室项目请从创新工作室页面提交。");
+    }
     const body = createRecordSchema.parse({ ...(request.body as Record<string, unknown>), typeKey: params.typeKey });
     const created = await withTransaction(async (client) => {
       const formType = await getFormType(body.typeKey, client);
@@ -1473,6 +2280,7 @@ export async function registerRoutes(app: FastifyInstance) {
       const currentResult = await client.query<any>("SELECT * FROM records WHERE id = $1 FOR UPDATE", [params.id]);
       const current = currentResult.rows[0];
       if (!current) throw app.httpErrors.notFound("Record not found.");
+      if (isInnovationRecord(current)) throw app.httpErrors.notFound("Innovation records are only editable in Innovation Studio.");
       if (!canViewRecord(request.user, current)) throw app.httpErrors.forbidden("No access to this record.");
 
       const formType = await getFormType(current.type_key, client);
@@ -1561,6 +2369,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const currentResult = await query<any>("SELECT * FROM records WHERE id = $1", [params.id]);
     const current = currentResult.rows[0];
     if (!current) throw app.httpErrors.notFound("Record not found.");
+    if (isInnovationRecord(current)) return app.httpErrors.notFound("Innovation records are only editable in Innovation Studio.");
     let feishuCleanup: { deletedCount: number; errors: string[] } | null = null;
     let feishuDeleteError: string | null = null;
     if (current.feishu_record_id) {
@@ -1612,6 +2421,9 @@ export async function registerRoutes(app: FastifyInstance) {
     const body = z.object({ recordIds: z.array(z.string().uuid()).min(1) }).parse(request.body);
     const uniqueIds = [...new Set(body.recordIds)];
     const currentResult = await query<any>("SELECT * FROM records WHERE id = ANY($1::uuid[])", [uniqueIds]);
+    if (currentResult.rows.some(isInnovationRecord)) {
+      return app.httpErrors.badRequest("创新工作室项目请在创新工作室页面管理。");
+    }
     let feishuWarnings = 0;
     const cleanupResults: Record<string, unknown> = {};
 
@@ -1661,6 +2473,7 @@ export async function registerRoutes(app: FastifyInstance) {
       const currentResult = await client.query<any>("SELECT * FROM records WHERE id = $1", [params.id]);
       const current = currentResult.rows[0];
       if (!current) throw app.httpErrors.notFound("Record not found.");
+      if (isInnovationRecord(current)) throw app.httpErrors.notFound("Innovation records are only editable in Innovation Studio.");
       const formType = await getFormType(current.type_key, client);
       if (!formType) throw app.httpErrors.badRequest("Missing form type.");
       const baseValues = current.values ?? {};
@@ -1736,10 +2549,14 @@ export async function registerRoutes(app: FastifyInstance) {
     systemWorkerOnly(request.user.role);
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ typeKey: z.string().min(1) }).parse(request.body);
+    if (body.typeKey === INNOVATION_TYPE_KEY) {
+      return app.httpErrors.badRequest("创新工作室项目请在创新工作室页面管理。");
+    }
     const conversion = await withTransaction(async (client) => {
       const currentResult = await client.query<any>("SELECT * FROM records WHERE id = $1 FOR UPDATE", [params.id]);
       const current = currentResult.rows[0];
       if (!current) throw app.httpErrors.notFound("Record not found.");
+      if (isInnovationRecord(current)) throw app.httpErrors.notFound("Innovation records are only editable in Innovation Studio.");
       if (current.type_key === body.typeKey) return { updated: current, oldTypeKey: null, oldFeishuRecordId: null };
       const targetType = await getFormType(body.typeKey, client);
       if (!targetType) throw app.httpErrors.badRequest("Target form type not found.");
@@ -1791,6 +2608,7 @@ export async function registerRoutes(app: FastifyInstance) {
     const recordResult = await query<any>("SELECT * FROM records WHERE id = $1", [params.id]);
     const record = recordResult.rows[0];
     if (!record) return app.httpErrors.notFound("Record not found.");
+    if (isInnovationRecord(record)) return app.httpErrors.notFound("Innovation records are only editable in Innovation Studio.");
     if (!canViewRecord(request.user, record)) return app.httpErrors.forbidden("No access to this record.");
     const comment = await query<any>(
       `INSERT INTO comments (record_id, author_user_id, author_name, body)
@@ -1981,6 +2799,21 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/feishu/bitable/status", async () => feishuService.bitableStatus());
+
+  app.get("/api/admin/feishu/bitable-link", async (request) => {
+    adminOnly(request.user.role);
+    const fallbackUrl = config.feishu.bitableAppToken
+      ? `https://feishu.cn/base/${encodeURIComponent(config.feishu.bitableAppToken)}${config.feishu.demandTableId ? `/table/${encodeURIComponent(config.feishu.demandTableId)}` : ""}`
+      : null;
+    return {
+      url: config.feishu.bitableWebUrl || fallbackUrl,
+      configured: Boolean(config.feishu.bitableWebUrl),
+      fallback: !config.feishu.bitableWebUrl && Boolean(fallbackUrl),
+      message: config.feishu.bitableWebUrl
+        ? "已配置飞书多维表格打开链接。"
+        : "未配置 FEISHU_BITABLE_WEB_URL，已按 app_token 生成默认打开链接。"
+    };
+  });
 
   app.get("/api/feishu/bitable/tables", async (request) => {
     adminOnly(request.user.role);

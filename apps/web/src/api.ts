@@ -1,4 +1,34 @@
-import type { FieldConfig, FormType, RecordDetail, RecordSummary, CurrentUser } from "@it/shared";
+import type {
+  CurrentUser,
+  FieldConfig,
+  FormType,
+  InnovationArticle,
+  InnovationArticleInput,
+  InnovationAward,
+  InnovationAwardInput,
+  InnovationProject,
+  InnovationProjectInput,
+  InnovationSupplementInput,
+  RecordDetail,
+  RecordSummary
+} from "@it/shared";
+
+export type ElevatedRole = "system_owner" | "admin";
+
+export type FeishuUserSearchResult = {
+  userId: string;
+  openId: string | null;
+  name: string;
+  department: string | null;
+  avatarUrl: string | null;
+};
+
+export type BitableLink = {
+  url: string | null;
+  configured: boolean;
+  fallback: boolean;
+  message: string;
+};
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
@@ -30,10 +60,11 @@ export function setDevIdentity(identity: { feishuUserId: string; name: string; r
 
 async function request<T>(path: string, options: RequestInit = {}) {
   const isFormData = options.body instanceof FormData;
+  const hasBody = options.body !== undefined && options.body !== null;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
-      ...(isFormData ? {} : { "content-type": "application/json" }),
+      ...(!isFormData && hasBody ? { "content-type": "application/json" } : {}),
       "x-dev-user-id": localStorage.getItem("devUserId") ?? "anonymous",
       "x-dev-user-name": headerSafe(localStorage.getItem("devUserName") ?? "未登录用户"),
       "x-dev-role": localStorage.getItem("devRole") ?? "business",
@@ -43,7 +74,7 @@ async function request<T>(path: string, options: RequestInit = {}) {
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.detail ?? error.error ?? response.statusText);
+    throw new Error(error.detail ?? error.message ?? error.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
 }
@@ -120,6 +151,10 @@ export const api = {
     body: JSON.stringify(values)
   }),
   adminMembers: () => request<any[]>("/api/admin/admin-members"),
+  bitableLink: () => request<BitableLink>("/api/admin/feishu/bitable-link"),
+  searchFeishuUsers: (query: string) => request<{ users: FeishuUserSearchResult[]; hasMore: boolean; pageToken: string | null }>(
+    `/api/feishu/users/search?query=${encodeURIComponent(query)}`
+  ),
   createAdminMember: (values: Record<string, unknown>) => request<any>("/api/admin/admin-members", {
     method: "POST",
     body: JSON.stringify(values)
@@ -154,4 +189,55 @@ export const api = {
     body: JSON.stringify({})
   }),
   accessRequests: () => request<any[]>("/api/admin/access-requests")
+  ,
+  feishuNotificationStatus: () => request<{ disabled: boolean }>("/api/admin/feishu/notifications"),
+  setFeishuNotificationStatus: (disabled: boolean) => request<{ disabled: boolean }>("/api/admin/feishu/notifications", {
+    method: "PATCH",
+    body: JSON.stringify({ disabled })
+  }),
+  innovationProjects: () => request<InnovationProject[]>("/api/innovation/projects"),
+  innovationProject: (id: string) => request<InnovationProject>(`/api/innovation/projects/${id}`),
+  createInnovationProject: (values: InnovationProjectInput) => request<InnovationProject>("/api/innovation/projects", {
+    method: "POST",
+    body: JSON.stringify(values)
+  }),
+  deleteInnovationProject: (id: string) => request<{ ok: boolean; id: string; recordNo: string | null }>(`/api/admin/innovation/projects/${id}`, {
+    method: "DELETE"
+  }),
+  supplementInnovationProject: (id: string, values: InnovationSupplementInput) => request<InnovationProject>(`/api/innovation/projects/${id}/supplement`, {
+    method: "PATCH",
+    body: JSON.stringify(values)
+  }),
+  innovationAwards: () => request<Array<InnovationAward & {
+    projectTitle: string;
+    recordNo: string | null;
+    projectStatus: string;
+    submitterName: string;
+    projectValues: Record<string, unknown>;
+  }>>("/api/innovation/awards"),
+  createInnovationAward: (values: InnovationAwardInput) => request<InnovationAward>("/api/admin/innovation/awards", {
+    method: "POST",
+    body: JSON.stringify(values)
+  }),
+  innovationArticles: (includeDrafts = false) => request<InnovationArticle[]>(`/api/innovation/articles${includeDrafts ? "?includeDrafts=true" : ""}`),
+  innovationArticle: (id: string) => request<InnovationArticle>(`/api/innovation/articles/${id}`),
+  createInnovationArticle: (values: InnovationArticleInput) => request<InnovationArticle>("/api/admin/innovation/articles", {
+    method: "POST",
+    body: JSON.stringify(values)
+  }),
+  uploadInnovationArticleWord: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return request<InnovationArticle>("/api/admin/innovation/articles/word", {
+      method: "POST",
+      body: formData
+    });
+  },
+  updateInnovationArticle: (id: string, values: Partial<InnovationArticleInput>) => request<InnovationArticle>(`/api/admin/innovation/articles/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(values)
+  }),
+  deleteInnovationArticle: (id: string) => request<{ ok: boolean; id: string }>(`/api/admin/innovation/articles/${id}`, {
+    method: "DELETE"
+  })
 };
