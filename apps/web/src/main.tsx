@@ -1,12 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { Bell, ClipboardList, Crown, Download, ExternalLink, Eye, FilePlus2, Filter, GripVertical, LoaderCircle, LogIn, MessageSquare, Network, Paperclip, PencilLine, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud, UserPlus } from "lucide-react";
-import type { CurrentUser, FieldConfig, FormType, RecordDetail, RecordSummary } from "@it/shared";
+import { Award, Bell, ClipboardList, Crown, Download, ExternalLink, Eye, FilePlus2, Filter, GripVertical, LoaderCircle, LogIn, MessageSquare, Network, Newspaper, Paperclip, PencilLine, Rocket, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud, UserPlus } from "lucide-react";
+import type { CurrentUser, FieldConfig, FormType, InnovationArticle, InnovationProject, RecordDetail, RecordSummary } from "@it/shared";
 import { API_BASE_URL, api, type BitableLink, type ElevatedRole, type FeishuUserSearchResult, setDevIdentity, storeCurrentUser } from "./api";
+import BlurText from "./components/react-bits/BlurText";
+import GradientText from "./components/react-bits/GradientText";
+import SplitText from "./components/react-bits/SplitText";
+import TextType from "./components/react-bits/TextType";
 import "./styles.css";
 
-type ViewKey = "home" | "submit" | "records" | "admin";
+type ViewKey = "home" | "submit" | "records" | "innovation" | "innovationNews" | "admin";
 type WorkViewKey = Exclude<ViewKey, "home">;
 const requireFeishuLogin = import.meta.env.VITE_REQUIRE_FEISHU_LOGIN !== "false";
 const feishuWebAppAutoLogin = import.meta.env.VITE_FEISHU_WEBAPP_AUTO_LOGIN === "true";
@@ -16,6 +20,9 @@ const roleLabels: Record<string, string> = {
   admin: "超级管理员",
   external: "外部用户"
 };
+const innovationFormTypeKey = "innovation_studio";
+const innovationAwardChoices = ["好点子", "好方案", "好收益"] as const;
+type InnovationAwardChoice = typeof innovationAwardChoices[number];
 
 function roleLabel(role?: string | null) {
   return roleLabels[role ?? ""] ?? "业务用户";
@@ -60,6 +67,7 @@ function App() {
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busyMessage, setBusyMessage] = useState("");
+  const [innovationEntering, setInnovationEntering] = useState(false);
   const [toast, setToast] = useState("");
 
   async function refresh() {
@@ -160,7 +168,8 @@ function App() {
     }
   }, [currentUser, view]);
 
-  const selectedType = formTypes.find((item) => item.key === activeType);
+  const standardFormTypes = formTypes.filter((item) => item.key !== innovationFormTypeKey);
+  const selectedType = standardFormTypes.find((item) => item.key === activeType);
   const isAdmin = currentUser?.role === "admin";
 
   async function runBusy<T>(message: string, task: () => Promise<T>) {
@@ -175,6 +184,14 @@ function App() {
   async function enterWorkView(nextView: WorkViewKey) {
     if (requireFeishuLogin && isUnauthenticatedUser(currentUser)) {
       await startFeishuLogin(setToast, nextView);
+      return;
+    }
+    if (nextView === "innovation") {
+      setInnovationEntering(true);
+      window.setTimeout(() => {
+        setView("innovation");
+        setInnovationEntering(false);
+      }, 1350);
       return;
     }
     setView(nextView);
@@ -194,12 +211,12 @@ function App() {
         <div className="brand">
           <div className="brand-mark"><img src="/dcec-logo-transparent.png" alt="DCEC" /></div>
           <div>
-            <strong>东风康明斯 IT 揭榜台</strong>
-            <span>需求与问题管理</span>
+            <strong>东风康明斯数字化需求与问题管理系统</strong>
           </div>
         </div>
-        <button className={view === "submit" ? "nav active" : "nav"} onClick={() => setView("submit")}><FilePlus2 size={18} />提交</button>
-        <button className={view === "records" ? "nav active" : "nav"} onClick={() => setView("records")}><ClipboardList size={18} />记录</button>
+        <button className={view === "submit" ? "nav active" : "nav"} onClick={() => setView("submit")}><FilePlus2 size={18} />问题或需求提交</button>
+        <button className={view === "records" ? "nav active" : "nav"} onClick={() => setView("records")}><ClipboardList size={18} />问题或需求记录</button>
+        <button className={view === "innovation" || view === "innovationNews" ? "nav active" : "nav"} onClick={() => enterWorkView("innovation").catch((error) => setToast(error.message))}><Rocket size={18} />创新工作室</button>
         {isAdmin ? <button className={view === "admin" ? "nav active" : "nav"} onClick={() => setView("admin")}><Settings2 size={18} />后台</button> : null}
         <button className="nav nav-home" onClick={() => setView("home")}><Sparkles size={18} />主页</button>
         <div className="rail-card">
@@ -212,7 +229,7 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Feishu-ready workbench</p>
-            <h1>{view === "submit" ? "统一提交入口" : view === "records" ? "进度追踪" : "配置后台"}</h1>
+            <h1>{view === "submit" ? "问题或需求提交" : view === "records" ? "问题或需求记录" : view === "innovation" ? "数字化创新工作室" : view === "innovationNews" ? "新闻与学习心得" : "配置后台"}</h1>
           </div>
           <div className="top-actions">
             <AuthBadge user={currentUser} onToast={setToast} />
@@ -226,7 +243,7 @@ function App() {
         {!loading && view === "submit" ? (
           requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           <SubmitPanel
-            formTypes={formTypes}
+            formTypes={standardFormTypes}
             activeType={activeType}
             selectedType={selectedType}
             fields={fields}
@@ -248,7 +265,7 @@ function App() {
           requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           <RecordsPanel
             records={records}
-            formTypes={formTypes}
+            formTypes={standardFormTypes}
             owners={owners}
             fields={detailFields}
             currentUser={currentUser}
@@ -316,6 +333,14 @@ function App() {
             }}
           />
         ) : null}
+        {!loading && view === "innovation" ? (
+          requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
+          <InnovationStudio currentUser={currentUser} onToast={setToast} onOpenNews={() => setView("innovationNews")} />
+        ) : null}
+        {!loading && view === "innovationNews" ? (
+          requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
+          <InnovationNewsPage currentUser={currentUser} onToast={setToast} onBack={() => setView("innovation")} />
+        ) : null}
         {!loading && view === "admin" ? (
           requireFeishuLogin && isUnauthenticatedUser(currentUser) ? null :
           isAdmin ? <AdminPanel /> : <div className="empty">你当前没有后台管理权限。</div>
@@ -336,6 +361,7 @@ function App() {
           </div>
         </div>
       ) : null}
+      {innovationEntering ? <InnovationEntryAnimation /> : null}
       {toast ? <button className="toast" onClick={() => setToast("")}>{toast}</button> : null}
     </main>
   );
@@ -351,15 +377,15 @@ function LandingHome({ user, loading, isAdmin, onLogin, onEnter }: {
   const needsLogin = requireFeishuLogin && isUnauthenticatedUser(user);
 
   return (
-    <section className="landing-home" aria-label="IT 揭榜台主页">
+    <section className="landing-home" aria-label="数字化需求与问题管理系统主页">
       <div className="landing-bg" />
       <div className="landing-scanline" />
       <header className="landing-top">
         <div className="landing-brand">
           <img src="/dcec-logo-transparent.png" alt="DCEC" />
           <div>
-            <strong>东风康明斯 IT 揭榜台</strong>
-            <span>Demand · Issue · Feishu Workflow</span>
+            <strong>东风康明斯数字化需求与问题管理系统</strong>
+            <span>Digital Demand · Issue · Feishu Workflow</span>
           </div>
         </div>
         <div className="landing-user">
@@ -376,30 +402,53 @@ function LandingHome({ user, loading, isAdmin, onLogin, onEnter }: {
 
       <div className="landing-content">
         <div className="landing-copy">
-          <span className="landing-kicker"><Sparkles size={16} />Digital ignition desk</span>
-          <h1>IT 需求与问题入口</h1>
-          <p>提交、分派、处理、追踪和飞书同步拆成清晰路径。登录后选择你的工作入口，进入真正的业务页面。</p>
+          <span className="landing-kicker"><Sparkles size={16} />Digital innovation studio</span>
+          <SplitText
+            tag="h1"
+            text="数字化创新工作室"
+            className="landing-split-title"
+            delay={58}
+            duration={0.7}
+            from={{ opacity: 0, y: 30, rotateX: -42 }}
+            to={{ opacity: 1, y: 0, rotateX: 0 }}
+            textAlign="left"
+            rootMargin="0px"
+          />
+          <BlurText
+            className="landing-blur-subtitle"
+              text="把工作中的痛点、灵感和共创项目集中到一个开放空间。创新工作室优先展示，需求与问题入口也在这里快速进入。"
+            delay={92}
+            animateBy="words"
+            direction="bottom"
+            stepDuration={0.42}
+            rootMargin="-40px"
+          />
           <div className="landing-actions">
-            <button className="landing-primary" type="button" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
-              {needsLogin ? <LogIn size={20} /> : <FilePlus2 size={20} />}
-              {needsLogin ? "飞书登录后提交" : "进入提交"}
+            <button className="landing-primary" type="button" onClick={() => needsLogin ? onLogin("innovation") : onEnter("innovation")}>
+              {needsLogin ? <LogIn size={20} /> : <Rocket size={20} />}
+              {needsLogin ? "飞书登录后进入" : "进入创新工作室"}
             </button>
-            <button className="landing-secondary" type="button" onClick={() => needsLogin ? onLogin("records") : onEnter("records")}>
-              <ClipboardList size={20} />
-              {needsLogin ? "登录后看记录" : "查看记录"}
+            <button className="landing-secondary" type="button" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
+              <FilePlus2 size={20} />
+              {needsLogin ? "登录后提交" : "问题或需求提交"}
             </button>
           </div>
         </div>
 
         <div className="landing-entry-grid">
-          <button type="button" className="landing-entry main-entry" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
-            <FilePlus2 size={26} />
-            <span>提交入口</span>
+          <button type="button" className="landing-entry main-entry innovation-entry" onClick={() => needsLogin ? onLogin("innovation") : onEnter("innovation")}>
+            <Rocket size={26} />
+            <span>创新工作室</span>
+            <strong>共创项目、评奖看板与学习新闻</strong>
+          </button>
+          <button type="button" className="landing-entry" onClick={() => needsLogin ? onLogin("submit") : onEnter("submit")}>
+            <FilePlus2 size={24} />
+            <span>问题或需求提交</span>
             <strong>需求 / 问题统一发起</strong>
           </button>
           <button type="button" className="landing-entry" onClick={() => needsLogin ? onLogin("records") : onEnter("records")}>
             <ClipboardList size={24} />
-            <span>记录追踪</span>
+            <span>问题或需求记录</span>
             <strong>查看状态、附件和时间线</strong>
           </button>
           {isAdmin ? (
@@ -428,14 +477,35 @@ function LandingHome({ user, loading, isAdmin, onLogin, onEnter }: {
 
 function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (message: string) => void }) {
   const [simulateOpen, setSimulateOpen] = useState(false);
+  const [notificationsDisabled, setNotificationsDisabled] = useState(false);
+  const [notificationBusy, setNotificationBusy] = useState(false);
   const simulationBackup = localStorage.getItem("superAdminSimulationBackup");
   const canSimulate = user?.role === "admin" || Boolean(simulationBackup);
+  const canToggleNotifications = user?.role === "admin";
   const simulationOptions = [
     { label: "IT管理员", feishuUserId: "a10986", name: "IT管理员测试用户", role: "system_owner", department: "权限名单" },
     { label: "业务用户", feishuUserId: "a10986", name: "业务用户测试用户", role: "business", department: "生产制造部" }
   ];
+  useEffect(() => {
+    if (!canToggleNotifications) return;
+    api.feishuNotificationStatus()
+      .then((status) => setNotificationsDisabled(status.disabled))
+      .catch(() => undefined);
+  }, [canToggleNotifications]);
   const loginWithFeishu = async () => {
     await startFeishuLogin(onToast);
+  };
+  const toggleNotifications = async () => {
+    setNotificationBusy(true);
+    try {
+      const next = await api.setFeishuNotificationStatus(!notificationsDisabled);
+      setNotificationsDisabled(next.disabled);
+      onToast(next.disabled ? "飞书通知已关闭，调试不会打扰同事" : "飞书通知已恢复");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "飞书通知开关失败");
+    } finally {
+      setNotificationBusy(false);
+    }
   };
   const simulateIdentity = (identity: typeof simulationOptions[number]) => {
     if (!simulationBackup && user?.role === "admin") {
@@ -465,6 +535,18 @@ function AuthBadge({ user, onToast }: { user: CurrentUser | null; onToast: (mess
         <span>{user?.name ?? "未登录"}</span>
         <strong>{roleLabel(user?.role)}</strong>
       </div>
+      {canToggleNotifications ? (
+        <button
+          type="button"
+          className={notificationsDisabled ? "notification-kill-switch muted" : "notification-kill-switch"}
+          disabled={notificationBusy}
+          onClick={toggleNotifications}
+          title="仅暂停飞书/小程序消息通知，不影响本地记录和多维表格同步"
+        >
+          <Bell size={15} />
+          {notificationsDisabled ? "通知已关闭" : "关闭通知"}
+        </button>
+      ) : null}
       {canSimulate ? (
         <div className="identity-switcher">
           {simulationBackup ? <button type="button" onClick={restoreSuperAdmin}>返回超级管理员</button> : null}
@@ -498,6 +580,868 @@ function LoginRequiredPanel({ onToast }: { onToast: (message: string) => void })
       <h2>需要飞书登录</h2>
       <p>在飞书客户端内会使用当前网页应用地址登录；在浏览器中会跳转到飞书网页登录。</p>
       <button className="command" type="button" onClick={login}><LogIn size={18} />飞书登录</button>
+    </section>
+  );
+}
+
+function InnovationEntryAnimation() {
+  return (
+    <div className="innovation-entry-overlay" aria-live="polite">
+      <div className="innovation-entry-core">
+        <span />
+        <span />
+        <span />
+      </div>
+      <div className="innovation-entry-copy">
+        <strong>数字化创新工作室</strong>
+        <small>正在进入共创空间</small>
+      </div>
+    </div>
+  );
+}
+
+type InnovationAwardView = {
+  id: string;
+  recordId: string;
+  awardName: string;
+  awardType: string | null;
+  reason: string | null;
+  displayOrder: number;
+  awardedByName: string;
+  awardedAt: string;
+  projectTitle: string;
+  recordNo: string | null;
+  projectStatus: string;
+  submitterName: string;
+  projectValues: Record<string, unknown>;
+};
+
+const innovationStatusChoices = ["待评审", "概念验证", "项目试点", "全面开展", "暂未入选（感谢你的创新提案）"] as const;
+type InnovationStatusValue = typeof innovationStatusChoices[number];
+
+function InnovationStudio({ currentUser, onToast, onOpenNews }: { currentUser: CurrentUser | null; onToast: (message: string) => void; onOpenNews: () => void }) {
+  const [projects, setProjects] = useState<InnovationProject[]>([]);
+  const [awards, setAwards] = useState<InnovationAwardView[]>([]);
+  const [articles, setArticles] = useState<InnovationArticle[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProject, setSelectedProject] = useState<InnovationProject | null>(null);
+  const [loadingInnovation, setLoadingInnovation] = useState(true);
+  const canManage = currentUser?.role === "admin" || currentUser?.role === "system_owner";
+  const scrollToInnovationSection = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  async function refreshInnovation() {
+    setLoadingInnovation(true);
+    try {
+      const [projectData, awardData, articleData] = await Promise.all([
+        api.innovationProjects(),
+        api.innovationAwards(),
+        api.innovationArticles(canManage)
+      ]);
+      setProjects(projectData);
+      setAwards(awardData);
+      setArticles(articleData);
+      if (selectedProjectId) {
+        const detail = await api.innovationProject(selectedProjectId).catch(() => null);
+        setSelectedProject(detail);
+      }
+    } finally {
+      setLoadingInnovation(false);
+    }
+  }
+
+  useEffect(() => {
+    refreshInnovation().catch((error) => onToast(error.message));
+  }, [canManage]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setSelectedProject(null);
+      return;
+    }
+    api.innovationProject(selectedProjectId)
+      .then(setSelectedProject)
+      .catch((error) => onToast(error.message));
+  }, [selectedProjectId]);
+
+  return (
+    <div className="innovation-page">
+      <section className="innovation-hero">
+        <div className="laser-flow" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="innovation-hero-copy">
+          <span className="innovation-kicker"><Rocket size={16} />Digital Innovation Studio</span>
+          <SplitText
+            tag="h2"
+            text="数字化创新工作室"
+            className="innovation-split-title"
+            delay={72}
+            duration={0.72}
+            from={{ opacity: 0, y: 34, rotateX: -48 }}
+            to={{ opacity: 1, y: 0, rotateX: 0 }}
+            textAlign="left"
+            rootMargin="0px"
+          />
+          <TextType
+            as="p"
+            className="innovation-type-line"
+            text={["开放包容，自由共创。", "每一个想法都值得被倾听。", "把痛点变成项目，把灵感变成成果。"]}
+            typingSpeed={44}
+            deletingSpeed={24}
+            pauseDuration={1300}
+            initialDelay={300}
+            textColors={["#ffffff"]}
+            cursorCharacter="_"
+          />
+          <BlurText
+            className="innovation-blur-copy"
+              text="数字化创新工作室是一个开放包容、自由共创的空间。说说你工作中的创新痛点、脑海里的奇思妙想，以及对工作室设备、服务、活动的真实期待。"
+            delay={54}
+            animateBy="words"
+            direction="bottom"
+            stepDuration={0.4}
+            rootMargin="-30px"
+          />
+          <BlurText
+            className="innovation-blur-copy"
+              text="这里没有对错，没有门槛，每一个想法都值得被倾听，每一条建议都将成为工作室成长的力量，期待你的发声，和我们一起共建属于大家的创新乐园！"
+            delay={54}
+            animateBy="words"
+            direction="bottom"
+            stepDuration={0.4}
+            rootMargin="-30px"
+          />
+          <div className="innovation-metrics">
+            <strong>{projects.length}<span>创新项目</span></strong>
+            <strong>{awards.length}<span>获奖展示</span></strong>
+            <strong>{articles.filter((item) => item.status === "published").length}<span>学习新闻</span></strong>
+          </div>
+          <div className="innovation-hero-actions">
+            <button type="button" onClick={() => scrollToInnovationSection("innovation-submit-section")}>
+              <Rocket size={17} />
+              提交创新
+            </button>
+            <button type="button" onClick={() => scrollToInnovationSection("innovation-records-section")}>
+              <ClipboardList size={17} />
+              记录管理
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <InnovationAwardsBoard awards={awards} />
+
+      <button type="button" className="innovation-news-gateway" onClick={onOpenNews}>
+        <div>
+          <span><Newspaper size={18} />Field Notes</span>
+          <strong>新闻与学习心得</strong>
+          <small>上传 Word 文档，自动生成正文预览，沉淀外出参观、展会学习和创新项目经验。</small>
+        </div>
+        <em>{articles.filter((item) => item.status === "published").length} 篇已发布</em>
+      </button>
+
+      <section id="innovation-records-section" className="innovation-board-shell">
+        <div className="innovation-section-title">
+          <div>
+          <span>Project Radar</span>
+          <h3><GradientText colors={["#ee2e24", "#1f1a17", "#f7f7f7", "#ee2e24"]} animationSpeed={4}>创新项目看板</GradientText></h3>
+          </div>
+          <button type="button" onClick={() => refreshInnovation().catch((error) => onToast(error.message))}>
+            {loadingInnovation ? "刷新中..." : "刷新"}
+          </button>
+        </div>
+        <InnovationProjectBoard
+          currentUser={currentUser}
+          canManage={canManage}
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          selectedProject={selectedProject}
+          onSelect={setSelectedProjectId}
+          onToast={onToast}
+          onUpdated={async (project) => {
+            setSelectedProject(project);
+            await refreshInnovation();
+          }}
+          onDeleted={async () => {
+            setSelectedProjectId(null);
+            setSelectedProject(null);
+            await refreshInnovation();
+          }}
+        />
+      </section>
+
+      <section id="innovation-submit-section" className="innovation-submit-section">
+        <InnovationProjectForm
+          onToast={onToast}
+          onCreated={async (project) => {
+            onToast(`已提交创新项目：${project.title}`);
+            setSelectedProjectId(project.id);
+            await refreshInnovation();
+          }}
+        />
+      </section>
+    </div>
+  );
+}
+
+function InnovationProjectForm({ onToast, onCreated }: {
+  onToast: (message: string) => void;
+  onCreated: (project: InnovationProject) => Promise<void>;
+}) {
+  const [values, setValues] = useState({
+    projectTheme: "",
+    projectDescription: "",
+    innovationKind: "创新建议",
+    leaderName: "",
+    leaderUserId: "",
+    estimatedDemandCost: ""
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [leaderSearchResults, setLeaderSearchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [leaderSearchMessage, setLeaderSearchMessage] = useState("");
+  const [searchingLeader, setSearchingLeader] = useState(false);
+  const isDemand = values.innovationKind === "创新需求";
+
+  async function searchLeader(event?: React.FormEvent) {
+    event?.preventDefault();
+    const keyword = values.leaderName.trim();
+    if (!keyword) {
+      setLeaderSearchMessage("请输入牵头人姓名、拼音或工号");
+      setLeaderSearchResults([]);
+      return;
+    }
+    setSearchingLeader(true);
+    setLeaderSearchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      setLeaderSearchResults(result.users);
+      setLeaderSearchMessage(result.users.length ? `找到 ${result.users.length} 个候选，请选择牵头人` : "没有找到匹配用户");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setLeaderSearchResults([]);
+      setLeaderSearchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再搜索用户" : message);
+    } finally {
+      setSearchingLeader(false);
+    }
+  }
+
+  function selectLeader(user: FeishuUserSearchResult) {
+    setValues((current) => ({
+      ...current,
+      leaderName: user.name,
+      leaderUserId: user.userId
+    }));
+    setLeaderSearchResults([]);
+    setLeaderSearchMessage(`${user.name} 已选为牵头人，user_id：${user.userId}`);
+  }
+
+  return (
+    <section className="innovation-card innovation-submit-card">
+      <div className="innovation-card-title">
+        <Sparkles size={20} />
+        <div>
+          <span>Launch Pad</span>
+          <h3>提交创新项目</h3>
+        </div>
+      </div>
+      <form onSubmit={async (event) => {
+        event.preventDefault();
+        setSubmitting(true);
+        try {
+          const created = await api.createInnovationProject(values as any);
+          setValues({ projectTheme: "", projectDescription: "", innovationKind: "创新建议", leaderName: "", leaderUserId: "", estimatedDemandCost: "" });
+          setLeaderSearchResults([]);
+          setLeaderSearchMessage("");
+          await onCreated(created);
+        } catch (error) {
+          onToast(error instanceof Error ? error.message : "提交失败");
+        } finally {
+          setSubmitting(false);
+        }
+      }}>
+        <label><span>项目主题<b>*</b></span><input value={values.projectTheme} onChange={(event) => setValues((current) => ({ ...current, projectTheme: event.target.value }))} required placeholder="一句话说明你的创新想法" /></label>
+        <label className="full"><span>描述（项目内容，预期收益）<b>*</b></span><textarea value={values.projectDescription} onChange={(event) => setValues((current) => ({ ...current, projectDescription: event.target.value }))} required rows={5} placeholder="痛点、设想、预期收益、需要工作室支持的方向" /></label>
+        <label className="innovation-kind-field"><span>类型<b>*</b></span><select value={values.innovationKind} onChange={(event) => setValues((current) => ({ ...current, innovationKind: event.target.value }))}>
+          <option value="创新建议">创新建议</option>
+          <option value="创新需求">创新需求</option>
+        </select>
+          <small>
+            创新建议只是建议稿，无实际执行人，需要其他人接榜；创新需求有明确牵头人、预计需求费用等。
+          </small>
+        </label>
+        <div className="leader-picker">
+          <label><span>牵头人{isDemand ? <b>*</b> : null}</span><input value={values.leaderName} onChange={(event) => {
+            const nextName = event.target.value;
+            setValues((current) => ({
+              ...current,
+              leaderName: nextName,
+              leaderUserId: nextName === current.leaderName ? current.leaderUserId : ""
+            }));
+          }} required={isDemand} placeholder="输入姓名或拼音后搜索" /></label>
+          <button type="button" className="leader-search-button" onClick={() => searchLeader()} disabled={searchingLeader || !values.leaderName.trim()}>
+            {searchingLeader ? <LoaderCircle size={16} /> : <Search size={16} />}
+            搜索
+          </button>
+          {values.leaderUserId ? <p className="leader-picked">已选择 user_id：{values.leaderUserId}</p> : null}
+          {leaderSearchMessage ? <p className="leader-search-message">{leaderSearchMessage}</p> : null}
+          {leaderSearchResults.length ? (
+            <div className="leader-search-results">
+              {leaderSearchResults.map((user) => (
+                <button type="button" key={user.userId} onClick={() => selectLeader(user)}>
+                  <strong>{user.name}</strong>
+                  <span>{user.department || "未返回部门"} · {user.userId}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <label><span>预计需求费用{isDemand ? <b>*</b> : null}</span><input value={values.estimatedDemandCost} onChange={(event) => setValues((current) => ({ ...current, estimatedDemandCost: event.target.value }))} required={isDemand} type="number" min="0" placeholder="创新需求需填写" /></label>
+        <button className="innovation-command" type="submit" disabled={submitting}>
+          {submitting ? <LoaderCircle size={17} /> : <Rocket size={17} />}
+          {submitting ? "发射中..." : "提交到创新工作室"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function InnovationAwardsBoard({ awards }: { awards: InnovationAwardView[] }) {
+  const [activeFilter, setActiveFilter] = useState<"全部" | InnovationAwardChoice>("全部");
+  const visibleAwards = awards.filter((award) => activeFilter === "全部" || award.awardName.split("、").includes(activeFilter));
+  const filterChoices = ["全部", ...innovationAwardChoices] as const;
+  const activeFilterIndex = filterChoices.findIndex((choice) => choice === activeFilter);
+  return (
+    <section className="innovation-card innovation-awards-card">
+      <div className="innovation-card-title">
+        <Award size={20} />
+        <div>
+          <span>Award Board</span>
+          <h3><GradientText colors={["#ffffff", "#ee2e24", "#ffffff", "#b8b1ad"]} animationSpeed={5}>优秀项目展示</GradientText></h3>
+        </div>
+        <div
+          className="award-filter-switch"
+          role="tablist"
+          aria-label="优秀项目奖项筛选"
+          style={{ "--award-filter-index": activeFilterIndex } as React.CSSProperties}
+        >
+          <span className="award-filter-thumb" aria-hidden="true" />
+          {filterChoices.map((choice) => (
+            <button
+              key={choice}
+              type="button"
+              className={activeFilter === choice ? "selected" : ""}
+              onClick={() => setActiveFilter(choice)}
+            >
+              {choice}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="award-list">
+        {visibleAwards.map((award) => (
+          <article key={award.id} className="award-item">
+            <span>{award.awardName}</span>
+            <h4><GradientText colors={["#ffffff", "#ee2e24", "#ffffff"]} animationSpeed={6}>{award.projectTitle}</GradientText></h4>
+            <p>{award.reason || award.awardName}</p>
+            <small>{award.awardedByName} · {new Date(award.awardedAt).toLocaleDateString("zh-CN")}</small>
+          </article>
+        ))}
+        {!visibleAwards.length ? <p className="innovation-empty">{awards.length ? "当前筛选下暂无获奖项目。" : "优秀项目评奖后会在这里点亮展示。"}</p> : null}
+      </div>
+    </section>
+  );
+}
+
+function InnovationProjectBoard({ currentUser, canManage, projects, selectedProjectId, selectedProject, onSelect, onToast, onUpdated, onDeleted }: {
+  currentUser: CurrentUser | null;
+  canManage: boolean;
+  projects: InnovationProject[];
+  selectedProjectId: string | null;
+  selectedProject: InnovationProject | null;
+  onSelect: (id: string | null) => void;
+  onToast: (message: string) => void;
+  onUpdated: (project: InnovationProject) => Promise<void>;
+  onDeleted: () => Promise<void>;
+}) {
+  const [supplement, setSupplement] = useState<{
+    leaderName: string;
+    leaderUserId: string;
+    participants: string;
+    participantsUserIds: string[];
+    workshopResources: string;
+    expectedCost: string;
+    expectedCycle: string;
+    status: InnovationStatusValue;
+  }>({
+    leaderName: "",
+    leaderUserId: "",
+    participants: "",
+    participantsUserIds: [],
+    workshopResources: "",
+    expectedCost: "",
+    expectedCycle: "",
+    status: "待评审"
+  });
+  const [award, setAward] = useState<{ awardNames: Array<(typeof innovationAwardChoices)[number]>; reason: string; displayOrder: number }>({ awardNames: [], reason: "", displayOrder: 0 });
+  const [saving, setSaving] = useState(false);
+  const [leaderSupplementSearchResults, setLeaderSupplementSearchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [leaderSupplementSearchMessage, setLeaderSupplementSearchMessage] = useState("");
+  const [searchingSupplementLeader, setSearchingSupplementLeader] = useState(false);
+  const [participantSearchKeyword, setParticipantSearchKeyword] = useState("");
+  const [participantSearchResults, setParticipantSearchResults] = useState<FeishuUserSearchResult[]>([]);
+  const [participantSearchMessage, setParticipantSearchMessage] = useState("");
+  const [searchingParticipant, setSearchingParticipant] = useState(false);
+  const isSuperAdmin = currentUser?.role === "admin";
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    setSupplement({
+      leaderName: formatFieldValue(selectedProject.values.leader_name),
+      leaderUserId: formatFieldValue(selectedProject.values.leader_user_id),
+      participants: formatFieldValue(selectedProject.values.participants),
+      participantsUserIds: Array.isArray(selectedProject.values.participants_user_ids)
+        ? selectedProject.values.participants_user_ids.map((item) => String(item)).filter(Boolean)
+        : [],
+      workshopResources: formatFieldValue(selectedProject.values.workshop_resources),
+      expectedCost: formatFieldValue(selectedProject.values.expected_cost),
+      expectedCycle: formatFieldValue(selectedProject.values.expected_cycle),
+      status: innovationStatusChoices.includes(selectedProject.status as InnovationStatusValue) ? selectedProject.status as InnovationStatusValue : "待评审"
+    });
+    setAward({ awardNames: [], reason: "", displayOrder: 0 });
+    setLeaderSupplementSearchResults([]);
+    setLeaderSupplementSearchMessage("");
+    setParticipantSearchKeyword("");
+    setParticipantSearchResults([]);
+    setParticipantSearchMessage("");
+  }, [selectedProject?.id]);
+
+  const canSupplementSelected = Boolean(selectedProject && (
+    canManage
+      || selectedProject.submitterUserId === currentUser?.id
+      || selectedProject.submitterFeishuUserId === currentUser?.feishuUserId
+      || selectedProject.submitterName === currentUser?.name
+  ));
+
+  async function searchSupplementLeader(event?: React.FormEvent) {
+    event?.preventDefault();
+    const keyword = supplement.leaderName.trim();
+    if (!keyword) {
+      setLeaderSupplementSearchMessage("请输入牵头人姓名、拼音或工号");
+      setLeaderSupplementSearchResults([]);
+      return;
+    }
+    setSearchingSupplementLeader(true);
+    setLeaderSupplementSearchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      setLeaderSupplementSearchResults(result.users);
+      setLeaderSupplementSearchMessage(result.users.length ? `找到 ${result.users.length} 个候选，请选择牵头人` : "没有找到匹配用户");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setLeaderSupplementSearchResults([]);
+      setLeaderSupplementSearchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再搜索用户" : message);
+    } finally {
+      setSearchingSupplementLeader(false);
+    }
+  }
+
+  function selectSupplementLeader(user: FeishuUserSearchResult) {
+    setSupplement((current) => ({
+      ...current,
+      leaderName: user.name,
+      leaderUserId: user.userId
+    }));
+    setLeaderSupplementSearchResults([]);
+    setLeaderSupplementSearchMessage(`${user.name} 已选为牵头人，user_id：${user.userId}`);
+  }
+
+  async function searchParticipant(event?: React.FormEvent) {
+    event?.preventDefault();
+    const keyword = participantSearchKeyword.trim();
+    if (!keyword) {
+      setParticipantSearchMessage("请输入参与人员姓名、拼音或工号");
+      setParticipantSearchResults([]);
+      return;
+    }
+    setSearchingParticipant(true);
+    setParticipantSearchMessage("");
+    try {
+      const result = await api.searchFeishuUsers(keyword);
+      setParticipantSearchResults(result.users);
+      setParticipantSearchMessage(result.users.length ? `找到 ${result.users.length} 个候选，请选择参与人员` : "没有找到匹配用户");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "搜索用户失败";
+      setParticipantSearchResults([]);
+      setParticipantSearchMessage(message.includes("missing_user_token") ? "需要用飞书重新登录后再搜索用户" : message);
+    } finally {
+      setSearchingParticipant(false);
+    }
+  }
+
+  function selectParticipant(user: FeishuUserSearchResult) {
+    setSupplement((current) => {
+      const names = current.participants.split(/[、,，\n]/).map((item) => item.trim()).filter(Boolean);
+      const nextNames = names.includes(user.name) ? names : [...names, user.name];
+      const nextUserIds = current.participantsUserIds.includes(user.userId)
+        ? current.participantsUserIds
+        : [...current.participantsUserIds, user.userId];
+      return {
+        ...current,
+        participants: nextNames.join("、"),
+        participantsUserIds: nextUserIds
+      };
+    });
+    setParticipantSearchKeyword("");
+    setParticipantSearchResults([]);
+    setParticipantSearchMessage(`${user.name} 已加入参与人员，user_id：${user.userId}`);
+  }
+
+  function removeParticipantUserId(userId: string) {
+    setSupplement((current) => ({
+      ...current,
+      participantsUserIds: current.participantsUserIds.filter((id) => id !== userId)
+    }));
+  }
+
+  return (
+    <div className="innovation-board">
+      <div className="innovation-project-list">
+        {projects.map((project) => {
+          const kind = formatFieldValue(project.values.innovation_kind) || "创新建议";
+          return (
+            <button key={project.id} type="button" className={project.id === selectedProjectId ? "innovation-project-row active" : "innovation-project-row"} onClick={() => onSelect(project.id)}>
+              <span className="innovation-status-dot" data-status={project.status} />
+              <strong>
+                {project.id === selectedProjectId
+                  ? <GradientText colors={["#ee2e24", "#1f1a17", "#ee2e24"]} animationSpeed={5}>{project.title}</GradientText>
+                  : project.title}
+              </strong>
+              <span className={kind === "创新需求" ? "innovation-kind-badge demand" : "innovation-kind-badge suggestion"}>{kind}</span>
+              <small>{project.recordNo ?? "未编号"} · {project.submitterName}</small>
+              <em>{project.status}</em>
+            </button>
+          );
+        })}
+        {!projects.length ? <div className="innovation-empty">暂无创新项目，先提交一个想法吧。</div> : null}
+      </div>
+      {selectedProject ? createPortal(
+        <div className="innovation-project-modal-backdrop" role="dialog" aria-modal="true" aria-label={selectedProject.title} onClick={() => onSelect(null)}>
+          <div className="innovation-project-detail innovation-project-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="innovation-detail-head">
+              <div>
+                <span>{selectedProject.recordNo ?? "创新项目"}</span>
+                <h3>{selectedProject.title}</h3>
+                <p>{formatFieldValue(selectedProject.values.innovation_kind)} · {selectedProject.status} · {selectedProject.submitterName}</p>
+              </div>
+              <div className="innovation-detail-actions">
+                <button type="button" className="innovation-modal-close" onClick={() => onSelect(null)}>关闭</button>
+                {isSuperAdmin ? (
+                  <button
+                    type="button"
+                    className="innovation-danger-button"
+                    onClick={async () => {
+                      const confirmed = window.confirm(`确定删除创新项目「${selectedProject.title}」吗？相关获奖展示也会同步移除。`);
+                      if (!confirmed) return;
+                      try {
+                        await api.deleteInnovationProject(selectedProject.id);
+                        onToast("创新项目已删除");
+                        await onDeleted();
+                      } catch (error) {
+                        onToast(error instanceof Error ? error.message : "删除创新项目失败");
+                      }
+                    }}
+                  >
+                    删除项目
+                  </button>
+                ) : null}
+                <Award size={24} />
+              </div>
+            </div>
+            <div className="innovation-value-grid">
+              <div className="full"><span>描述</span><strong>{formatFieldValue(selectedProject.values.project_description)}</strong></div>
+              <div><span>牵头人</span><strong>{formatFieldValue(selectedProject.values.leader_name) || "暂无"}</strong></div>
+              <div><span>预计需求费用</span><strong>{formatFieldValue(selectedProject.values.estimated_demand_cost) || "暂无"}</strong></div>
+              <div><span>参与人员</span><strong>{formatFieldValue(selectedProject.values.participants) || "待补充"}</strong></div>
+              <div className="full"><span>参与人员 user_id</span><strong>{formatFieldValue(selectedProject.values.participants_user_ids) || "待补充"}</strong></div>
+              <div className="full"><span>工作室资源</span><strong>{formatFieldValue(selectedProject.values.workshop_resources) || "待补充"}</strong></div>
+              <div><span>预期费用</span><strong>{formatFieldValue(selectedProject.values.expected_cost) || "待补充"}</strong></div>
+              <div><span>预期周期</span><strong>{formatFieldValue(selectedProject.values.expected_cycle) || "待补充"}</strong></div>
+            </div>
+            {canSupplementSelected ? (
+              <form className="innovation-supplement-form" onSubmit={async (event) => {
+                event.preventDefault();
+                setSaving(true);
+                try {
+                  const updated = await api.supplementInnovationProject(selectedProject.id, canManage ? supplement : {
+                    leaderName: supplement.leaderName,
+                    leaderUserId: supplement.leaderUserId,
+                    participants: supplement.participants,
+                    participantsUserIds: supplement.participantsUserIds,
+                    workshopResources: supplement.workshopResources,
+                    expectedCost: supplement.expectedCost,
+                    expectedCycle: supplement.expectedCycle
+                  });
+                  onToast("创新项目信息已保存");
+                  await onUpdated(updated);
+                } catch (error) {
+                  onToast(error instanceof Error ? error.message : "保存失败");
+                } finally {
+                  setSaving(false);
+                }
+              }}>
+                <h4>补充协同信息</h4>
+                <div className="leader-picker">
+                  <label><span>牵头人</span><input value={supplement.leaderName} onChange={(event) => {
+                    const nextName = event.target.value;
+                    setSupplement((current) => ({
+                      ...current,
+                      leaderName: nextName,
+                      leaderUserId: nextName === current.leaderName ? current.leaderUserId : ""
+                    }));
+                  }} placeholder="创新建议可后续补充牵头人" /></label>
+                  <button type="button" className="leader-search-button" onClick={() => searchSupplementLeader()} disabled={searchingSupplementLeader || !supplement.leaderName.trim()}>
+                    {searchingSupplementLeader ? <LoaderCircle size={16} /> : <Search size={16} />}
+                    搜索
+                  </button>
+                  {supplement.leaderUserId ? <p className="leader-picked">已选择 user_id：{supplement.leaderUserId}</p> : null}
+                  {leaderSupplementSearchMessage ? <p className="leader-search-message">{leaderSupplementSearchMessage}</p> : null}
+                  {leaderSupplementSearchResults.length ? (
+                    <div className="leader-search-results">
+                      {leaderSupplementSearchResults.map((user) => (
+                        <button type="button" key={user.userId} onClick={() => selectSupplementLeader(user)}>
+                          <strong>{user.name}</strong>
+                          <span>{user.department || "未返回部门"} · {user.userId}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="participant-picker">
+                  <label className="full"><span>参与人员</span><textarea value={supplement.participants} onChange={(event) => setSupplement((current) => ({ ...current, participants: event.target.value }))} rows={3} placeholder="可手动填写，也可搜索内部用户后自动追加" /></label>
+                  <div className="participant-search-row">
+                    <input value={participantSearchKeyword} onChange={(event) => setParticipantSearchKeyword(event.target.value)} placeholder="输入姓名或拼音搜索参与人员" />
+                    <button type="button" className="leader-search-button" onClick={() => searchParticipant()} disabled={searchingParticipant || !participantSearchKeyword.trim()}>
+                      {searchingParticipant ? <LoaderCircle size={16} /> : <Search size={16} />}
+                      搜索
+                    </button>
+                  </div>
+                  {supplement.participantsUserIds.length ? (
+                    <div className="participant-user-chips">
+                      {supplement.participantsUserIds.map((userId) => (
+                        <button type="button" key={userId} onClick={() => removeParticipantUserId(userId)} title="点击移除">
+                          {userId}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {participantSearchMessage ? <p className="leader-search-message">{participantSearchMessage}</p> : null}
+                  {participantSearchResults.length ? (
+                    <div className="leader-search-results">
+                      {participantSearchResults.map((user) => (
+                        <button type="button" key={user.userId} onClick={() => selectParticipant(user)}>
+                          <strong>{user.name}</strong>
+                          <span>{user.department || "未返回部门"} · {user.userId}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <label className="full"><span>所需工作室资源</span><textarea value={supplement.workshopResources} onChange={(event) => setSupplement((current) => ({ ...current, workshopResources: event.target.value }))} rows={4} placeholder="例如：3D打印、会议室、测试环境、边缘设备、工业相机等" /></label>
+                <label><span>预期费用</span><input value={supplement.expectedCost} onChange={(event) => setSupplement((current) => ({ ...current, expectedCost: event.target.value }))} type="number" min="0" /></label>
+                <label><span>预期周期</span><input value={supplement.expectedCycle} onChange={(event) => setSupplement((current) => ({ ...current, expectedCycle: event.target.value }))} placeholder="例如：2个月" /></label>
+                {canManage ? <label><span>状态</span><select value={supplement.status} onChange={(event) => setSupplement((current) => ({ ...current, status: event.target.value as InnovationStatusValue }))}>
+                  {innovationStatusChoices.map((status) => <option key={status} value={status}>{status}</option>)}
+                </select></label> : null}
+                <button className="innovation-command compact" disabled={saving} type="submit">{saving ? "保存中..." : "保存补充"}</button>
+              </form>
+            ) : null}
+            {canManage ? (
+              <form className="innovation-award-form" onSubmit={async (event) => {
+                event.preventDefault();
+                if (!award.awardNames.length) return;
+                try {
+                  await api.createInnovationAward({
+                    recordId: selectedProject.id,
+                    awardNames: award.awardNames,
+                    reason: award.reason || null,
+                    displayOrder: Number(award.displayOrder || 0)
+                  });
+                  setAward({ awardNames: [], reason: "", displayOrder: 0 });
+                  onToast("已加入获奖看板");
+                  await onUpdated(await api.innovationProject(selectedProject.id));
+                } catch (error) {
+                  onToast(error instanceof Error ? error.message : "评奖失败");
+                }
+              }}>
+                <h4>评奖展示</h4>
+                <div className="award-choice-grid">
+                  {innovationAwardChoices.map((choice) => {
+                    const selected = award.awardNames.includes(choice);
+                    return (
+                      <label key={choice} className={selected ? "award-choice selected" : "award-choice"}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => setAward((current) => ({
+                            ...current,
+                            awardNames: event.target.checked
+                              ? [...current.awardNames, choice]
+                              : current.awardNames.filter((item) => item !== choice)
+                          }))}
+                        />
+                        <span>{choice}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <label><span>展示理由</span><input value={award.reason} onChange={(event) => setAward((current) => ({ ...current, reason: event.target.value }))} placeholder="为什么值得展示" /></label>
+                <label><span>看板排序</span><input value={award.displayOrder} onChange={(event) => setAward((current) => ({ ...current, displayOrder: Number(event.target.value) }))} type="number" placeholder="数字越小越靠前" /></label>
+                <button type="submit" disabled={!award.awardNames.length}>加入看板</button>
+              </form>
+            ) : null}
+            <ul className="timeline-list compact innovation-timeline">
+              {(selectedProject.timeline ?? []).map((item) => (
+                <li key={item.id}>
+                  <span />
+                  <div className="timeline-copy">
+                    <strong>{item.title}</strong>
+                    <small>{item.body}</small>
+                    <small className="timeline-meta">{item.actorName ? `${item.actorName} · ` : ""}{formatTimelineDate(item.createdAt)}</small>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>,
+        document.body
+      ) : null}
+    </div>
+  );
+}
+
+function InnovationNewsPage({ currentUser, onToast, onBack }: {
+  currentUser: CurrentUser | null;
+  onToast: (message: string) => void;
+  onBack: () => void;
+}) {
+  const [articles, setArticles] = useState<InnovationArticle[]>([]);
+  const [activeArticle, setActiveArticle] = useState<InnovationArticle | null>(null);
+  const [uploadingWord, setUploadingWord] = useState(false);
+  const canManage = currentUser?.role === "admin" || currentUser?.role === "system_owner";
+  const canDeleteArticles = currentUser?.role === "admin";
+
+  async function refreshArticles() {
+    const data = await api.innovationArticles(canManage);
+    setArticles(data);
+    if (activeArticle && !data.some((article) => article.id === activeArticle.id)) setActiveArticle(null);
+  }
+
+  useEffect(() => {
+    refreshArticles().catch((error) => onToast(error.message));
+  }, [canManage]);
+
+  return (
+    <section className="innovation-news-shell innovation-news-page">
+      <div className="innovation-section-title">
+        <div>
+          <span>Field Notes</span>
+          <h3>创新项目新闻与学习心得</h3>
+        </div>
+        <button type="button" onClick={onBack}>返回工作室</button>
+      </div>
+      {canManage ? (
+        <label className={uploadingWord ? "word-upload-panel uploading" : "word-upload-panel"}>
+          <UploadCloud size={26} />
+          <strong>{uploadingWord ? "正在解析 Word 文档..." : "上传 Word 文档发布学习心得"}</strong>
+          <span>支持 .docx，系统会保存原文档并自动提取正文作为在线预览。</span>
+          <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={uploadingWord} onChange={async (event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith(".docx")) {
+              onToast("请上传 .docx 格式的 Word 文档，旧版 .doc 需要先另存为 .docx。");
+              return;
+            }
+            if (!file.size) {
+              onToast("上传文件为空，请重新选择 Word 文档。");
+              return;
+            }
+            setUploadingWord(true);
+            try {
+              const article = await api.uploadInnovationArticleWord(file);
+              setActiveArticle(article);
+              onToast("Word 文档已上传并发布");
+              await refreshArticles();
+            } catch (error) {
+              onToast(error instanceof Error ? error.message : "Word 上传失败");
+            } finally {
+              setUploadingWord(false);
+            }
+          }} />
+        </label>
+      ) : null}
+      <div className="innovation-news-grid">
+        <div className="innovation-article-list">
+          {articles.map((article) => (
+            <article key={article.id} className="innovation-article-card">
+              <button type="button" onClick={() => setActiveArticle(article)}>
+                <img src={article.coverImageUrl ? absoluteApiUrl(article.coverImageUrl) : "/visuals/innovation/news-showcase.png"} alt="" />
+                <span>{article.status === "published" ? "已发布" : article.status === "archived" ? "已下线" : "草稿"}</span>
+                <h4>{article.title}</h4>
+                <p>{article.summary}</p>
+                <small>{article.authorName} · {article.publishedAt ? formatTimelineDate(article.publishedAt) : "未发布"}</small>
+              </button>
+              {canDeleteArticles ? (
+                <button
+                  type="button"
+                  className="article-delete-button"
+                  onClick={async () => {
+                    const confirmed = window.confirm(`确定删除新闻「${article.title}」吗？删除后业务用户将无法阅读。`);
+                    if (!confirmed) return;
+                    try {
+                      await api.deleteInnovationArticle(article.id);
+                      const nextArticles = articles.filter((item) => item.id !== article.id);
+                      setArticles(nextArticles);
+                      if (activeArticle?.id === article.id) setActiveArticle(nextArticles[0] ?? null);
+                      onToast("新闻已删除");
+                    } catch (error) {
+                      onToast(error instanceof Error ? error.message : "删除新闻失败");
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              ) : null}
+            </article>
+          ))}
+          {!articles.length ? <div className="innovation-empty">管理员上传 Word 学习心得后会展示在这里。</div> : null}
+        </div>
+      </div>
+      {activeArticle ? createPortal(
+        <div className="innovation-article-modal" role="dialog" aria-modal="true" aria-label={activeArticle.title}>
+          <button className="article-modal-backdrop" type="button" aria-label="关闭新闻详情" onClick={() => setActiveArticle(null)} />
+          <article className="innovation-article-reader fullscreen">
+            <div className="article-reader-toolbar">
+              <div>
+                <span>{activeArticle.status === "published" ? "Word 预览" : "管理预览"}</span>
+                <h4>{activeArticle.title}</h4>
+              </div>
+              <button type="button" onClick={() => setActiveArticle(null)}>关闭</button>
+            </div>
+            <img src={activeArticle.coverImageUrl ? absoluteApiUrl(activeArticle.coverImageUrl) : "/visuals/innovation/news-showcase.png"} alt="" />
+            <p>{activeArticle.summary}</p>
+            <AttachmentList value={activeArticle.attachments} compact />
+            <DocxArticlePreview value={activeArticle.attachments} />
+            <div className="article-body">{activeArticle.body}</div>
+            <ArticleImagePreview value={activeArticle.attachments} />
+          </article>
+        </div>,
+        document.body
+      ) : null}
     </section>
   );
 }
@@ -603,6 +1547,7 @@ type AttachmentValue = {
   mimeType?: string;
   size?: number;
   fileToken?: string;
+  source?: string;
 };
 
 function asAttachmentList(value: unknown): AttachmentValue[] {
@@ -617,7 +1562,8 @@ function asAttachmentList(value: unknown): AttachmentValue[] {
           storedName: typeof object.storedName === "string" ? object.storedName : undefined,
           mimeType: typeof object.mimeType === "string" ? object.mimeType : undefined,
           size: typeof object.size === "number" ? object.size : undefined,
-          fileToken: typeof object.fileToken === "string" ? object.fileToken : typeof object.file_token === "string" ? object.file_token : undefined
+          fileToken: typeof object.fileToken === "string" ? object.fileToken : typeof object.file_token === "string" ? object.file_token : undefined,
+          source: typeof object.source === "string" ? object.source : undefined
         };
       })
       .filter((item) => item.name || item.url || item.fileToken);
@@ -656,6 +1602,141 @@ function isPreviewableAttachment(item: AttachmentValue) {
   return mimeType.startsWith("image/")
     || mimeType.startsWith("text/")
     || /\.(png|jpe?g|gif|webp|svg|txt|md|csv|json|log)$/i.test(name);
+}
+
+function isImageAttachment(item: AttachmentValue) {
+  const mimeType = item.mimeType ?? "";
+  const name = item.name.toLowerCase();
+  return item.source === "word_image" || mimeType.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(name);
+}
+
+function isDocxAttachment(item: AttachmentValue) {
+  const mimeType = item.mimeType ?? "";
+  const name = item.name.toLowerCase();
+  return mimeType.includes("wordprocessingml.document") || name.endsWith(".docx");
+}
+
+function fitDocxPreviewToWidth(container: HTMLDivElement) {
+  const wrapper = container.querySelector<HTMLElement>(".docx-wrapper");
+  const firstPage = container.querySelector<HTMLElement>("section.docx");
+  if (!wrapper || !firstPage) return;
+
+  (wrapper.style as any).zoom = "";
+  wrapper.style.removeProperty("transform");
+  wrapper.style.removeProperty("width");
+  wrapper.style.removeProperty("height");
+  const canvasStyle = window.getComputedStyle(container);
+  const horizontalPadding = parseFloat(canvasStyle.paddingLeft) + parseFloat(canvasStyle.paddingRight);
+  const availableWidth = Math.max(240, container.clientWidth - horizontalPadding);
+  const pageWidth = firstPage.offsetWidth || firstPage.getBoundingClientRect().width;
+  if (!pageWidth) return;
+
+  const scale = Math.min(1, availableWidth / pageWidth);
+  wrapper.style.width = `${pageWidth}px`;
+  wrapper.style.margin = "0 auto";
+  (wrapper.style as any).zoom = String(scale);
+}
+
+function DocxArticlePreview({ value }: { value: unknown }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const docx = asAttachmentList(value).find(isDocxAttachment);
+  const links = docx ? attachmentLinks(docx) : null;
+  const previewUrl = links?.previewUrl || links?.downloadUrl || "";
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !docx || !previewUrl) {
+      setStatus("idle");
+      return;
+    }
+
+    let cancelled = false;
+    container.innerHTML = "";
+    setStatus("loading");
+    setMessage("");
+
+    fetch(previewUrl, { credentials: "include" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Word 文档读取失败：${response.status}`);
+        return response.blob();
+      })
+      .then(async (blob) => {
+        const { renderAsync } = await import("docx-preview");
+        await renderAsync(blob, container, undefined, {
+          inWrapper: true,
+          className: "docx",
+          breakPages: true,
+          renderHeaders: true,
+          renderFooters: true,
+          ignoreWidth: false,
+          ignoreHeight: false,
+          useBase64URL: true
+        });
+        fitDocxPreviewToWidth(container);
+      })
+      .then(() => {
+        if (!cancelled) setStatus("ready");
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          container.innerHTML = "";
+          setStatus("error");
+          setMessage(error instanceof Error ? error.message : "Word 原格式预览失败，可下载附件查看。");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      container.innerHTML = "";
+    };
+  }, [docx?.fileToken, docx?.url, docx?.name, previewUrl]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || status !== "ready") return;
+    const handleResize = () => fitDocxPreviewToWidth(container);
+    const observer = new ResizeObserver(() => fitDocxPreviewToWidth(container));
+    observer.observe(container);
+    window.addEventListener("resize", handleResize);
+    fitDocxPreviewToWidth(container);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [status]);
+
+  if (!docx) return null;
+  return (
+    <div className="docx-preview-panel">
+      <div className="docx-preview-head">
+        <strong>Word 原格式预览</strong>
+        {links?.downloadUrl ? <a href={links.downloadUrl} download={docx.name || true}>下载原文档</a> : null}
+      </div>
+      {status === "loading" ? <p>正在加载 Word 原格式预览...</p> : null}
+      {status === "error" ? <p>{message}</p> : null}
+      <div ref={containerRef} className="docx-preview-canvas" />
+    </div>
+  );
+}
+
+function ArticleImagePreview({ value }: { value: unknown }) {
+  const images = asAttachmentList(value).filter(isImageAttachment);
+  if (!images.length) return null;
+  return (
+    <div className="article-image-preview">
+      <strong>Word 图片预览</strong>
+      <div>
+        {images.map((image, index) => {
+          const links = attachmentLinks(image);
+          const src = links.previewUrl || (image.url ? absoluteApiUrl(image.url) : "");
+          if (!src) return null;
+          return <img key={`${image.url ?? image.name}-${index}`} src={src} alt={image.name || `Word 图片 ${index + 1}`} />;
+        })}
+      </div>
+    </div>
+  );
 }
 
 function AttachmentList({ value, compact = false, onRemove }: {

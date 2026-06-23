@@ -128,3 +128,104 @@ export const notificationEventKeys = [
   "record_closed"
 ] as const;
 export type NotificationEventKey = typeof notificationEventKeys[number];
+
+export const innovationTypeSchema = z.enum(["创新建议", "创新需求"]);
+export type InnovationType = z.infer<typeof innovationTypeSchema>;
+
+export const innovationStatusOptions = [
+  "待评审",
+  "概念验证",
+  "项目试点",
+  "全面开展",
+  "暂未入选（感谢你的创新提案）"
+] as const;
+export const innovationStatusSchema = z.enum(innovationStatusOptions);
+export type InnovationStatus = z.infer<typeof innovationStatusSchema>;
+
+export const innovationProjectInputSchema = z.object({
+  projectTheme: z.string().min(1),
+  projectDescription: z.string().min(1),
+  innovationKind: innovationTypeSchema,
+  leaderName: z.string().optional().nullable(),
+  leaderUserId: z.string().optional().nullable(),
+  estimatedDemandCost: z.union([z.string(), z.number()]).optional().nullable()
+});
+export type InnovationProjectInput = z.infer<typeof innovationProjectInputSchema>;
+
+export const innovationSupplementInputSchema = z.object({
+  leaderName: z.string().optional().nullable(),
+  leaderUserId: z.string().optional().nullable(),
+  participants: z.string().optional().nullable(),
+  participantsUserIds: z.array(z.string()).optional().nullable(),
+  workshopResources: z.string().optional().nullable(),
+  expectedCost: z.union([z.string(), z.number()]).optional().nullable(),
+  expectedCycle: z.string().optional().nullable(),
+  status: innovationStatusSchema.optional()
+});
+export type InnovationSupplementInput = z.infer<typeof innovationSupplementInputSchema>;
+
+export const innovationAwardOptions = ["好点子", "好方案", "好收益"] as const;
+export const innovationAwardOptionSchema = z.enum(innovationAwardOptions);
+export type InnovationAwardOption = z.infer<typeof innovationAwardOptionSchema>;
+
+export const innovationAwardInputSchema = z.object({
+  recordId: z.string().uuid(),
+  awardNames: z.array(innovationAwardOptionSchema).min(1),
+  reason: z.string().optional().nullable(),
+  displayOrder: z.number().int().optional()
+});
+export type InnovationAwardInput = z.infer<typeof innovationAwardInputSchema>;
+
+export const innovationArticleInputSchema = z.object({
+  title: z.string().min(1),
+  summary: z.string().optional().default(""),
+  body: z.string().optional().default(""),
+  coverImageUrl: z.string().optional().nullable(),
+  attachments: z.array(z.unknown()).optional().default([]),
+  status: z.enum(["draft", "published", "archived"]).default("draft")
+});
+export type InnovationArticleInput = z.infer<typeof innovationArticleInputSchema>;
+
+export const innovationAwardSchema = z.object({
+  id: z.string(),
+  recordId: z.string(),
+  awardName: z.string(),
+  awardType: z.string().nullable(),
+  reason: z.string().nullable(),
+  displayOrder: z.number(),
+  awardedByName: z.string(),
+  awardedAt: z.string()
+});
+export type InnovationAward = z.infer<typeof innovationAwardSchema>;
+
+export const innovationProjectSchema = z.object({
+  id: z.string(),
+  recordNo: z.string().nullable(),
+  title: z.string(),
+  status: z.string(),
+  submitterUserId: z.string().nullable(),
+  submitterFeishuUserId: z.string().nullable(),
+  submitterName: z.string(),
+  ownerName: z.string().nullable(),
+  values: z.record(z.unknown()),
+  awards: z.array(innovationAwardSchema),
+  timeline: recordDetailSchema.shape.timeline.optional(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type InnovationProject = z.infer<typeof innovationProjectSchema>;
+
+export const innovationArticleSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  body: z.string(),
+  coverImageUrl: z.string().nullable(),
+  attachments: z.array(z.unknown()),
+  status: z.enum(["draft", "published", "archived"]),
+  authorName: z.string(),
+  publishedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type InnovationArticle = z.infer<typeof innovationArticleSchema>;

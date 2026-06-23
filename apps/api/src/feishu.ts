@@ -6,6 +6,7 @@ type NotificationPayload = {
   body: string;
   submitterFeishuUserId?: string | null;
   ownerFeishuUserId?: string | null;
+  extraFeishuUserIds?: Array<string | null | undefined>;
 };
 
 type ReceiveIdType = "open_id" | "user_id" | "union_id" | "email" | "chat_id";
@@ -115,9 +116,14 @@ export class FeishuService {
       console.info("[feishu:mock-notification]", payload);
       return { ok: true, mocked: true };
     }
-    const recipients = [payload.submitterFeishuUserId, payload.ownerFeishuUserId].filter((id): id is string => Boolean(id));
+    const recipients = [
+      payload.submitterFeishuUserId,
+      payload.ownerFeishuUserId,
+      ...(payload.extraFeishuUserIds ?? [])
+    ].filter((id): id is string => Boolean(id));
+    const uniqueRecipients = [...new Set(recipients)];
     const results = [];
-    for (const receiveId of recipients) {
+    for (const receiveId of uniqueRecipients) {
       results.push(await this.sendTextMessage({
         receiveId,
         receiveIdType: config.feishu.messageReceiveIdType as ReceiveIdType,
@@ -431,6 +437,7 @@ export class FeishuService {
   tableIdForType(typeKey: string) {
     if (typeKey === "demand") return config.feishu.demandTableId;
     if (typeKey === "issue") return config.feishu.issueTableId;
+    if (typeKey === "innovation_studio") return config.feishu.innovationTableId;
     if (typeKey === "system_owner") return config.feishu.systemOwnerTableId;
     return "";
   }
